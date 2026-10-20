@@ -24,10 +24,24 @@ body:
     validations:
       required: true
   - type: textarea
+    id: setup-log
+    attributes:
+      label: Setup log (if setup stopped or misbehaved)
+      description: Drag in the newest `logs/setup-<date>-<time>.log` from your FastStrata folder; setup names it where it stops. Your account and PC names and any API key are already taken out of it.
+    validations:
+      required: false
+  - type: textarea
     id: log
     attributes:
       label: Engine log
       description: Drag in `strata-<model>.log` from your FastStrata folder. Drag and drop works directly into this box.
+    validations:
+      required: false
+  - type: textarea
+    id: gateway-log
+    attributes:
+      label: Gateway logs (if OpenCode or the FastStrata app is involved)
+      description: From `gateway/` in your FastStrata folder, drag in `gateway.log` and `gui.log`.
     validations:
       required: false
   - type: markdown
