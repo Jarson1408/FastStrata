@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 340" width="960" height="340" role="img" aria-label="Writing speed in tokens per second. Laptop with an 8 GB card: Qwen3.6-35B-A3B 94 to 100, Gemma 4 26B-A4B 92 to 93, Ornith 1.5 76 to 82, Tiel Coder 35B-A3B 83. Workstation with a 32 GB card: Qwen3.6-35B-A3B 385 to 393, Gemma 4 26B-A4B 326 to 349, Ornith 1.5 303 to 315, Tiel Coder 35B-A3B 308 to 312, GLM 5.3 Flash 59 to 66."><title>Writing speed of the five added models, tokens per second</title>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.h{font-size:21px;font-weight:700;fill:#f2f4f7}
+.s{font-size:13px;fill:#98a2b3}
+.p{font-size:14px;font-weight:600;fill:#d0d5dd}
+.m{font-size:14px;fill:#e4e7ec}
+.v{font-size:14px;font-weight:700;fill:#f2f4f7}
+.t{fill:#1d2939}
+</style>
+<rect width="960" height="340" rx="14" fill="#101828"/>
+<text x="32" y="46" class="h">Tokens per second while writing an answer</text>
+<text x="32" y="68" class="s">in a short chat, the first size of each model</text>
+
+<text x="32" y="110" class="p">Laptop: RTX 4070 Laptop (8 GB), 32 GB RAM</text>
+<text x="32" y="150" class="m">Qwen3.6-35B-A3B</text>
+<rect x="176" y="136" width="240" height="18" rx="4" class="t"/><rect x="176" y="136" width="194" height="18" rx="4" fill="#7c9cff"/>
+<text x="424" y="150" class="v">94-100</text>
+<text x="32" y="184" class="m">Gemma 4 26B-A4B</text>
+<rect x="176" y="170" width="240" height="18" rx="4" class="t"/><rect x="176" y="170" width="185" height="18" rx="4" fill="#5ad1a4"/>
+<text x="424" y="184" class="v">92-93</text>
+<text x="32" y="218" class="m">Ornith 1.5</text>
+<rect x="176" y="204" width="240" height="18" rx="4" class="t"/><rect x="176" y="204" width="158" height="18" rx="4" fill="#f5b25c"/>
+<text x="424" y="218" class="v">76-82</text>
+<text x="32" y="252" class="m">Tiel Coder 35B-A3B</text>
+<rect x="176" y="238" width="240" height="18" rx="4" class="t"/><rect x="176" y="238" width="166" height="18" rx="4" fill="#67d4e6"/>
+<text x="424" y="252" class="v">83</text>
+<text x="32" y="286" class="s">The card holds part of the experts, the CPU computes the rest.</text>
+
+<text x="512" y="110" class="p">Workstation: RTX 5090 (32 GB)</text>
+<text x="512" y="150" class="m">Qwen3.6-35B-A3B</text>
+<rect x="656" y="136" width="216" height="18" rx="4" class="t"/><rect x="656" y="136" width="213" height="18" rx="4" fill="#7c9cff"/>
+<text x="880" y="150" class="v">394-395</text>
+<text x="512" y="184" class="m">Gemma 4 26B-A4B</text>
+<rect x="656" y="170" width="216" height="18" rx="4" class="t"/><rect x="656" y="170" width="191" height="18" rx="4" fill="#5ad1a4"/>
+<text x="880" y="184" class="v">353-356</text>
+<text x="512" y="218" class="m">Ornith 1.5</text>
+<rect x="656" y="204" width="216" height="18" rx="4" class="t"/><rect x="656" y="204" width="171" height="18" rx="4" fill="#f5b25c"/>
+<text x="880" y="218" class="v">316-319</text>
+<text x="512" y="252" class="m">Tiel Coder 35B-A3B</text>
+<rect x="656" y="238" width="216" height="18" rx="4" class="t"/><rect x="656" y="238" width="182" height="18" rx="4" fill="#67d4e6"/>
+<text x="880" y="252" class="v">337-345</text>
+<text x="512" y="286" class="m">GLM 5.3 Flash</text>
+<rect x="656" y="272" width="216" height="18" rx="4" class="t"/><rect x="656" y="272" width="32" height="18" rx="4" fill="#e88bd0"/>
+<text x="880" y="286" class="v">59-66</text>
+<text x="512" y="316" class="s">GLM 5.3 Flash is a 79 to 114 GB file. Most of it stays in RAM.</text>
+</svg>
