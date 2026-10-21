@@ -68,19 +68,20 @@ reports. The full table by card and preset: [docs/RESULTS.md](docs/RESULTS.md#wh
 3. **Use it:** start the **FastStrata** shortcut, open OpenCode and pick a model of the provider **FastStrata**
    (setup put the gateway and OpenCode's config in place), or chat in the browser at `http://127.0.0.1:8080`.
 
-In step 2 setup first asks whether the NVIDIA card shows your desktop (a screen plugged into it); it finds out
-itself and offers that as the answer. A card that shows the desktop keeps some VRAM for it, so there the safe context is
-10% below the longest that fits (128K instead of 144K on a 6 GB card). Then it shows the safe choice for this PC, a
-preset and a context: Enter installs that one with no more questions. Or choose yourself from the four presets judged for this PC, with the speed measured on the test laptop and
-what each costs the answers: one or several (`1,3`), each with its own context. They run one at a time (the gateway
-swaps them when OpenCode asks for another), so each is judged on its own; their downloads add up. Then setup downloads
-the ready-made engine from FastStrata's latest release (155 MB: Windows, an NVIDIA card from RTX 20 to RTX 50 with
-driver 580 or newer, a CPU with AVX2; checked against the SHA-256 GitHub publishes) or, on any other PC, compiles it
-(about five minutes on the test laptop, once; on Windows it offers to install Visual Studio 2022's compiler and the
-CUDA toolkit), downloads the models (17 to 24 GB each, resumable), writes
-each one's config with the options this PC takes, and offers the
-[gateway for OpenCode](#opencode-and-the-faststrata-gateway). The screen shows short sentences; `--details` shows every
-measurement and command too, and [the log](#if-setup-stops) always has them.
+In step 2 setup first asks whether the NVIDIA card shows your desktop (a screen plugged into it); it finds out itself
+and offers that as the answer. A card that shows the desktop keeps some VRAM for it, so there the safe context is 10%
+below the longest that fits (128K instead of 144K on a 6 GB card). Then it shows the safe choice for this PC, a preset
+and a context: Enter installs that one with no more questions. Or choose yourself from the four presets judged for this
+PC, with the speed measured on the test laptop and what each costs the answers: one or several (`1,3`), each with its
+own context and answer length (8K, 16K or 32K; the safe one is the preset's own, Qwen3.6 16K and Ornith 8K, and an
+answer takes at most a quarter of the context). They run one at a time (the gateway swaps them when OpenCode asks for
+another), so each is judged on its own; their downloads add up. Then setup downloads the ready-made engine from
+FastStrata's latest release (155 MB: Windows, an NVIDIA card from RTX 20 to RTX 50 with driver 580 or newer, a CPU with
+AVX2; checked against the SHA-256 GitHub publishes) or, on any other PC, compiles it (about five minutes on the test
+laptop, once; on Windows it offers to install Visual Studio 2022's compiler and the CUDA toolkit), downloads the models
+(17 to 24 GB each, resumable), writes each one's config with the options this PC takes, and offers the [gateway for
+OpenCode](#opencode-and-the-faststrata-gateway). The screen shows short sentences; `--details` shows every measurement
+and command too, and [the log](#if-setup-stops) always has them.
 
 **Next time**, open the desktop shortcut **FastStrata** (with the gateway) or run `START-HERE.bat` again: it starts
 the installed model and downloads nothing twice. The first start after a reboot reads the model's file from the SSD:
@@ -96,7 +97,8 @@ START-HERE.bat --family qwen36 --model UD-Q4_K_M --context 147456 --yes
 ```
 
 Several presets at once: `--models UD-Q4_K_M,APEX-I-QUALITY` (or `--model` given twice), with `--context N` for all of
-them or `--context UD-Q4_K_M=147456,APEX-I-QUALITY=65536` for each (`./setup.sh` takes the same options on Linux).
+them or `--context UD-Q4_K_M=147456,APEX-I-QUALITY=65536` for each; `--max-output N` (or `MODEL=N`) sets the answer length
+the same way (`./setup.sh` takes the same options on Linux).
 Or paste this into Claude Code, Cursor, Codex or Copilot:
 
 ```text

@@ -245,8 +245,10 @@ class ChoosingSeveral(Case):
                                         "Which context for Qwen3.6-35B-A3B Q4": "3"})
         self.assertEqual(code, 0, out)
         self.assertEqual(self.m.questions, [DESKTOP, "Which way", "Which ones", "Do you want images",
-                                            "Which context for Qwen3.6-35B-A3B Q4", "Keep conversations in RAM",
-                                            "Which context for Ornith 1.5 35B-A3B Quality", GATEWAY])
+                                            "Which context for Qwen3.6-35B-A3B Q4",
+                                            "How long may an answer of Qwen3.6-35B-A3B Q4 be",
+                                            "Keep conversations in RAM", "Which context for Ornith 1.5 35B-A3B Quality",
+                                            "How long may an answer of Ornith 1.5 35B-A3B Quality be", GATEWAY])
         self.assertEqual(arg(self.m.config(Q4), "--max-context"), "65536")
         self.assertEqual(arg(self.m.config(QUALITY), "--max-context"), "147456")
         # images and the conversation cache: one answer for both
@@ -320,6 +322,38 @@ class ChoosingSeveral(Case):
         self.assertIn("need ~48 GB for the 2 models", out)
         self.assertNotIn("Step 3", out)
         self.assertEqual(list(self.m.t.glob("strata-*.json")), [])
+
+
+class TheAnswerLength(Case):
+    """--max-output, the question where the models are chosen by hand, and what the gateway gets."""
+
+    def test_the_safe_choice_keeps_the_presets_own_without_asking(self):
+        code, out = self.m.run(answers={})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("How long may an answer", " ".join(self.m.questions))
+        self.assertEqual(self.m.config(Q4)["max_output"], 16384)
+        self.assertEqual(self.m.gateway_settings()["models"][0]["max_output"], 16384)
+
+    def test_chosen_by_hand_with_the_safe_one_marked(self):
+        code, out = self.m.run(answers={"Which way": "2", "Which ones": "1", "How long may an answer": "3"})
+        self.assertEqual(code, 0, out)
+        self.assertIn("2) 16K tokens, the prompt up to 128K   (safe)", out)
+        self.assertEqual(self.m.config(Q4)["max_output"], 32768)
+        g = self.m.gateway_settings()["models"][0]
+        self.assertEqual((g["max_output"], g["max_n_predict"], g["context_reserve"]), (32768, 32768, 32768))
+
+    def test_given_for_one_model(self):
+        code, out = self.m.run(["--models", "UD-Q4_K_M,APEX-I-QUALITY", "--max-output", "APEX-I-QUALITY=16K",
+                                "--yes"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.m.config(Q4)["max_output"], 16384)
+        self.assertEqual(self.m.config(QUALITY)["max_output"], 16384)   # Ornith's own is 8K
+
+    def test_at_most_a_quarter_of_the_context(self):
+        code, out = self.m.run(["--model", "UD-Q4_K_M", "--context", "65536", "--max-output", "32768", "--yes"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("--max-output 32768: a quarter of the 64K context at most, so 16384", out)
+        self.assertEqual(self.m.config(Q4)["max_output"], 16384)
 
 
 class AModelThatFails(Case):

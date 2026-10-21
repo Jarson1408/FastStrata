@@ -5183,6 +5183,7 @@ def choices_from_config(cfg_path: Path) -> dict:
         a = cfg.get("args", [])
         ctx = a[a.index("--max-context") + 1] if "--max-context" in a and a.index("--max-context") + 1 < len(a) else None
         return {"family": own, "model": size, "context": int(ctx) if ctx and ctx.isdigit() else None, "kv": None,
+                "max_output": cfg.get("max_output"),
                 "vision": "none", "esp": "off", "host": cfg.get("host"), "api_key": cfg.get("api_key"),
                 "port": cfg.get("port"), "gpu": cfg.get("gpu"), "layer_split": None,
                 "cuda": 12 if config_toolkit(cfg) == 12 else None, "vram_reserve_mib": None}
@@ -5198,6 +5199,7 @@ def choices_from_config(cfg_path: Path) -> dict:
     esp_path = esp.rsplit(":", 1)[0] if esp else None
     return {"family": family, "model": model if model in sizes else None,
             "context": int(val("--max-context")) if val("--max-context") else None,
+            "max_output": cfg.get("max_output"),
             "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
             "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
@@ -6241,14 +6243,14 @@ def preset_label(family, model) -> str:
     return f"{FAMILIES[family]['title']} {FASTSTRATA_PRESETS.get((family, model), {}).get('name', model)}"
 
 
-def parse_contexts(values, known) -> tuple:
-    """--context, given once or more: N (or 144K) for every model, MODEL=N for one -> (N or None, {MODEL: N}).
-    ValueError says what is wrong; `known`: the model names there are."""
+def parse_contexts(values, known, flag="--context") -> tuple:
+    """--context (or --max-output: `flag`), given once or more: N (or 144K) for every model, MODEL=N for one -> (N or
+    None, {MODEL: N}).  ValueError says what is wrong; `known`: the model names there are."""
     def tokens(v):
         v = v.strip().upper()
         n = int(v[:-1]) * 1024 if v.endswith("K") and v[:-1].isdigit() else int(v) if v.isdigit() else None
         if n is None:
-            raise ValueError(f"--context {v}: a number of tokens (147456, or 144K)")
+            raise ValueError(f"{flag} {v}: a number of tokens (147456, or 144K)")
         return n
     every, each = None, {}
     for value in values or []:
@@ -6259,7 +6261,7 @@ def parse_contexts(values, known) -> tuple:
             model, n = (x.strip() for x in part.split("=", 1))
             name = next((k for k in known if k.upper() == model.upper()), None)
             if name is None:
-                raise ValueError(f"--context {part.strip()}: no model {model} (MODEL=N, e.g. UD-Q4_K_M=147456)")
+                raise ValueError(f"{flag} {part.strip()}: no model {model} (MODEL=N, e.g. UD-Q4_K_M=147456)")
             each[name] = tokens(n)
     return every, each
 
@@ -6267,6 +6269,36 @@ def parse_contexts(values, known) -> tuple:
 def context_given(a, model):
     """The context --context gives `model` (its own MODEL=N, else N for every model), or None."""
     return (getattr(a, "context_for", None) or {}).get(model) or a.context
+
+
+FASTSTRATA_OUTPUTS = [8192, 16384, 32768]   # the answer lengths "Choose the models myself" offers
+
+
+def faststrata_output(a, pick, family, model, ctx, several=False) -> int:
+    """The longest answer the gateway and OpenCode let `model` write, its thinking with it: --max-output (N, or
+    MODEL=N); else an earlier install's; else asked where the models are chosen by hand; else the preset's own
+    (GATEWAY_MODELS: Qwen3.6 16K, Ornith 8K), the safe one.  At most a quarter of the context: the gateway keeps that
+    much of the window free for the answer, so the rest is the prompt's."""
+    cap = max(1024, ctx // 4)
+    safe = min(GATEWAY_MODELS[(family, model)][2], cap)
+    given = (getattr(a, "max_output_for", None) or {}).get(model) or getattr(a, "max_output", None)
+    if given:
+        if given > cap:
+            warn(f"--max-output {given}: a quarter of the {ctx // 1024}K context at most, so {cap}")
+        return min(given, cap)
+    if pick.get("max_output"):                         # set up the same way as the earlier install
+        return min(pick["max_output"], cap)
+    if pick.get("context"):                            # the safe choice, or a context given: no more questions
+        return safe
+    options = sorted(n for n in set(FASTSTRATA_OUTPUTS) | {safe} if n <= cap)
+    say()
+    say("  Answer length = the most one answer may write, its thinking too. A longer one leaves less of the context")
+    say("  for the prompt (the chat, files, tool output).")
+    for i, n in enumerate(options, 1):
+        say(f"  {i}) {n // 1024}K tokens, the prompt up to {(ctx - n) // 1024}K" + ("   (safe)" if n == safe else ""))
+    label = preset_label(family, model)
+    return options[int(ask(f"How long may an answer of {label} be?" if several else "How long may an answer be?",
+                           [str(i) for i in range(1, len(options) + 1)], str(options.index(safe) + 1), a.yes)) - 1]
 
 
 def faststrata_menu(a, gpu, ram, have=()) -> list:
@@ -7137,6 +7169,9 @@ def poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, adopted, sha
         ctx = POLY_CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(POLY_CONTEXTS) + 1)],
                                    str(POLY_CONTEXTS.index(32768) + 1), a.yes)) - 1]
     ok(f"context: {ctx} tokens")
+    max_out = faststrata_output(a, pick, family, model, ctx, several) if (family, model) in GATEWAY_MODELS else None
+    if max_out:
+        ok(f"answers: up to {max_out} tokens")
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     earlier = adopted if adopted is not None and adopted.name == cfg_path.name else None
     before = [cfg_path, earlier]
@@ -7244,6 +7279,7 @@ def poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, adopted, sha
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
              "use --models-dir on a bigger drive")
     return {"family": family, "fam": fam, "title": title, "model": model, "d": d, "vision": vision, "ctx": ctx,
+            "max_output": max_out,
             "kv": kv, "mode": mode, "kind": kind, "conv": conv, "need_ram": need_ram, "tag": tag,
             "cfg_path": cfg_path, "earlier": earlier, "models_dir": models_dir, "shards": shards,
             "have_model": have_model, "guesser": guesser, "have_guesser": have_guesser, "mmproj": mmproj,
@@ -7345,6 +7381,8 @@ def poly_install(a, p, gpu, hip, multi, ram, data, elsewhere, port, cuda_tk, lla
            "log": str(ROOT / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
     if kind:                                           # a setup run again keeps it (poly_saved_speedups())
         cfg["speedups"] = mode
+    if p.get("max_output"):                            # the gateway's and OpenCode's answer length (gateway_models())
+        cfg["max_output"] = p["max_output"]
     if multi:                                          # the server passes --layer-split and orders the cards
         cfg["gpu"], cfg["gpus_asked"] = multi, True
         cfg["layer_split"] = a.layer_split or "auto"
@@ -7518,7 +7556,7 @@ def gateway_models(configs) -> list:
         if entry is None or not ch.get("context"):
             continue
         model_id, label, output = entry
-        output = min(output, ch["context"] // 4)
+        output = min(ch.get("max_output") or output, ch["context"] // 4)   # chosen at setup, else the preset's
         models.append({"id": model_id, "label": label, "engine": "polystrata", "upstream": ENGINE_URL,
                        "target": cfg.name, "family": "qwen3", "n_ctx": ch["context"], "context_reserve": output,
                        "max_n_predict": output, "max_output": output, "sampling": dict(QWEN_SAMPLING),
@@ -8276,6 +8314,10 @@ def main() -> int:
                     help="the context in tokens: N (147456, or 144K) for every model, MODEL=N for one (--context "
                          "UD-Q4_K_M=147456,APEX-I-QUALITY=65536). Default: asked (Enter or --yes: the one recommended "
                          "for this PC)")
+    ap.add_argument("--max-output", action="append", metavar="N|MODEL=N",
+                    help="the longest answer in tokens, its thinking too: N (32768, or 32K) for every model, MODEL=N "
+                         "for one. Default: Qwen3.6 16K, Ornith 8K, asked where the models are chosen by hand; at "
+                         "most a quarter of the context")
     ap.add_argument("--rope-scaling", choices=["none", "linear", "yarn"],
                     help="the RoPE extension for a context past the model's trained 262144: linear (position "
                          "interpolation) or yarn - llama.cpp's types. Omitted with a scaled context, the setup "
@@ -8431,6 +8473,13 @@ def main() -> int:
     stray = [m for m in a.context_for if names and m not in names]
     if stray:
         ap.error(f"--context {stray[0]}=...: {stray[0]} is not among the models named ({', '.join(names)})")
+    try:
+        a.max_output, a.max_output_for = parse_contexts(a.max_output, known, "--max-output")
+    except ValueError as e:
+        ap.error(str(e))
+    stray = [m for m in a.max_output_for if names and m not in names]
+    if stray:
+        ap.error(f"--max-output {stray[0]}=...: {stray[0]} is not among the models named ({', '.join(names)})")
     # a strata-poly family's own size (FAMILIES[f]["models"]) is checked by poly_setup, which names the family
     if a.model and a.model not in MODELS and a.family not in PREVIEW_FAMILIES and             not any(a.model in d.get("models", {}) for d in FAMILIES.values()):
         ap.error(f"--model {a.model} is a size of " + ", ".join(f"--family {f}" for f, d in PREVIEW_FAMILIES.items()
@@ -8490,6 +8539,7 @@ def main() -> int:
                         was = choices_from_config(c)
                         a.picks.append({"family": was["family"], "model": was["model"], "adopted": c,
                                         "context": context_given(a, was["model"]) or was["context"],
+                                        "max_output": was.get("max_output"),
                                         "vision": a.vision or was["vision"]})
                 a.gateway_before = earlier_gateway(prev.parent)
                 say(f"  Found your earlier install in {prev.parent} ({', '.join(c.stem[len('strata-'):] for c in same)}): "

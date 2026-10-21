@@ -106,6 +106,7 @@ The flags (all of them: `START-HERE.bat --help`):
 | `--family qwen36\|ornith` | the model |
 | `--model UD-Q4_K_M\|UD-Q3_K_M\|APEX-I-QUALITY\|APEX-I-COMPACT` | the preset (default: the one setup recommends for this PC, with its context); with `--yes` it is also the consent to a preset setup's estimate finds too big; given more than once, several presets |
 | `--models A,B` | several presets at once, e.g. `UD-Q4_K_M,APEX-I-QUALITY`; the first is started first |
+| `--max-output N` or `MODEL=N` | the longest answer in tokens, its thinking too (default: Qwen3.6 16384, Ornith 8192; at most a quarter of the context); the gateway's and OpenCode's limit |
 | `--context N` or `MODEL=N` | context in tokens, `144K` = 147456 (default: the longest that keeps the cache in 16 or 8 bits on this card, up to 147456); `N` for every preset, `MODEL=N` for one (`UD-Q4_K_M=147456,APEX-I-QUALITY=65536`) |
 | `--vision yes\|no\|gpu\|cpu` | read pictures; `--yes` leaves them off |
 | `--gpu N` | the card (default: the one with the most VRAM) |

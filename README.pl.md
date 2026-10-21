@@ -68,20 +68,20 @@ pokazuje wynik. Pełna tabela według karty i presetu: [docs/RESULTS.pl.md](docs
 3. **Używaj:** uruchom skrót **FastStrata**, otwórz OpenCode i wybierz model dostawcy **FastStrata** (setup
    zainstalował bramkę i wpisał konfigurację OpenCode) albo rozmawiaj w przeglądarce pod `http://127.0.0.1:8080`.
 
-W kroku 2 setup najpierw pyta, czy karta NVIDIA wyświetla pulpit (czy jest do niej podłączony ekran); sam to
-wykrywa i podaje jako odpowiedź. Karta, która wyświetla pulpit, trzyma na niego trochę VRAM, więc wtedy bezpieczny
-kontekst jest o 10% mniejszy od najdłuższego, który się mieści (128K zamiast 144K na karcie 6 GB). Potem pokazuje
-bezpieczny wybór dla tego komputera, preset z kontekstem: Enter instaluje go bez dalszych pytań. Albo
-wybierz sam z czterech presetów ocenionych dla tego komputera, z prędkością zmierzoną na laptopie testowym i z tym, ile
-każdy kosztuje odpowiedzi: jeden albo kilka (`1,3`), każdy z własnym kontekstem. Działają po jednym naraz (bramka
-przełącza je, gdy OpenCode prosi o inny), więc każdy jest oceniany osobno; ich pobrania się sumują. Potem setup
-pobiera gotowy silnik z najnowszego wydania FastStrata (155 MB: Windows, karta NVIDIA od RTX 20 do RTX 50 ze
-sterownikiem 580 lub nowszym, procesor z AVX2; sprawdzony z SHA-256, które podaje GitHub) albo, na każdym innym
-komputerze, go kompiluje (około pięciu minut na testowym laptopie, jednorazowo; na Windows proponuje instalację
-kompilatora Visual Studio 2022 i CUDA toolkit), pobiera modele (17–24 GB każdy, z możliwością wznowienia),
-zapisuje konfigurację każdego z opcjami, które przyjmuje ten komputer, i proponuje
-[bramkę dla OpenCode](#opencode-i-faststrata-gateway). Na ekranie są krótkie zdania; `--details` pokazuje
-też każdy pomiar i polecenie, a [log](#gdy-setup-się-zatrzyma) ma je zawsze.
+W kroku 2 setup najpierw pyta, czy karta NVIDIA wyświetla pulpit (czy jest do niej podłączony ekran); sam to wykrywa i
+podaje jako odpowiedź. Karta, która wyświetla pulpit, trzyma na niego trochę VRAM, więc wtedy bezpieczny kontekst jest o
+10% mniejszy od najdłuższego, który się mieści (128K zamiast 144K na karcie 6 GB). Potem pokazuje bezpieczny wybór dla
+tego komputera, preset z kontekstem: Enter instaluje go bez dalszych pytań. Albo wybierz sam z czterech presetów
+ocenionych dla tego komputera, z prędkością zmierzoną na laptopie testowym i z tym, ile każdy kosztuje odpowiedzi: jeden
+albo kilka (`1,3`), każdy z własnym kontekstem i długością odpowiedzi (8K, 16K albo 32K; bezpieczna to własna długość
+presetu, Qwen3.6 16K i Ornith 8K, a odpowiedź zajmuje najwyżej ćwierć kontekstu). Działają po jednym naraz (bramka
+przełącza je, gdy OpenCode prosi o inny), więc każdy jest oceniany osobno; ich pobrania się sumują. Potem setup pobiera
+gotowy silnik z najnowszego wydania FastStrata (155 MB: Windows, karta NVIDIA od RTX 20 do RTX 50 ze sterownikiem 580
+lub nowszym, procesor z AVX2; sprawdzony z SHA-256, które podaje GitHub) albo, na każdym innym komputerze, go kompiluje
+(około pięciu minut na testowym laptopie, jednorazowo; na Windows proponuje instalację kompilatora Visual Studio 2022 i
+CUDA toolkit), pobiera modele (17–24 GB każdy, z możliwością wznowienia), zapisuje konfigurację każdego z opcjami, które
+przyjmuje ten komputer, i proponuje [bramkę dla OpenCode](#opencode-i-faststrata-gateway). Na ekranie są krótkie zdania;
+`--details` pokazuje też każdy pomiar i polecenie, a [log](#gdy-setup-się-zatrzyma) ma je zawsze.
 
 **Następnym razem** otwórz skrót **FastStrata** na pulpicie (z bramką) albo uruchom ponownie `START-HERE.bat`:
 uruchamia zainstalowany model i niczego nie pobiera dwa razy. Pierwszy start po uruchomieniu komputera czyta plik
@@ -97,8 +97,8 @@ START-HERE.bat --family qwen36 --model UD-Q4_K_M --context 147456 --yes
 ```
 
 Kilka presetów naraz: `--models UD-Q4_K_M,APEX-I-QUALITY` (albo dwa razy `--model`), z `--context N` dla wszystkich
-albo `--context UD-Q4_K_M=147456,APEX-I-QUALITY=65536` dla każdego z osobna (`./setup.sh` przyjmuje na Linuksie te same
-opcje). Albo wklej to do Claude Code, Cursor, Codex lub Copilot:
+albo `--context UD-Q4_K_M=147456,APEX-I-QUALITY=65536` dla każdego z osobna; `--max-output N` (albo `MODEL=N`) tak samo
+ustawia długość odpowiedzi (`./setup.sh` przyjmuje na Linuksie te same opcje). Albo wklej to do Claude Code, Cursor, Codex lub Copilot:
 
 ```text
 Set up FastStrata on this PC for me: https://github.com/Jarson1408/FastStrata - follow docs/AI_SETUP.md there.

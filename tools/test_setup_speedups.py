@@ -563,7 +563,8 @@ class Install(unittest.TestCase):
         code, out, cfg = self.laptop(answers={})
         self.assertEqual(code, 0, out)
         self.assertEqual([q.split("?")[0].strip() for q in self.asked],
-                         ["Is the desktop on the NVIDIA card", "Do you want images", "Keep conversations in RAM"])
+                         ["Is the desktop on the NVIDIA card", "Do you want images", "How long may an answer be",
+                          "Keep conversations in RAM"])
         self.assertIn("--kv-q8", cfg["args"])
         self.assertIn("attention cache: 8 bits, so 144K fits this card", out)
         self.assertNotIn("Go on anyway", out)
