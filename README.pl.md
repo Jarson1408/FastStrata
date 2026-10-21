@@ -64,11 +64,14 @@ pokazuje wynik. Pełna tabela według karty i presetu: [docs/RESULTS.pl.md](docs
 
 1. **Pobierz** [zip][zip] i rozpakuj go gdziekolwiek albo zrób `git clone` [repozytorium][repo].
 2. **Uruchom setup:** na Windows kliknij dwukrotnie **`START-HERE.bat`**; na Linuksie uruchom w folderze
-   **`./setup.sh`**. Naciskaj Enter, żeby wybrać to, co poleca.
+   **`./setup.sh`**. Naciskaj Enter, żeby przyjąć bezpieczny wybór.
 3. **Używaj:** uruchom skrót **FastStrata**, otwórz OpenCode i wybierz model dostawcy **FastStrata** (setup
    zainstalował bramkę i wpisał konfigurację OpenCode) albo rozmawiaj w przeglądarce pod `http://127.0.0.1:8080`.
 
-W kroku 2 setup sprawdza komputer i poleca dla niego preset z kontekstem: Enter instaluje go bez dalszych pytań. Albo
+W kroku 2 setup najpierw pyta, czy karta NVIDIA wyświetla pulpit (czy jest do niej podłączony ekran); sam to
+wykrywa i podaje jako odpowiedź. Karta, która wyświetla pulpit, trzyma na niego trochę VRAM, więc wtedy bezpieczny
+kontekst jest o 10% mniejszy od najdłuższego, który się mieści (128K zamiast 144K na karcie 6 GB). Potem pokazuje
+bezpieczny wybór dla tego komputera, preset z kontekstem: Enter instaluje go bez dalszych pytań. Albo
 wybierz sam z czterech presetów ocenionych dla tego komputera, z prędkością zmierzoną na laptopie testowym i z tym, ile
 każdy kosztuje odpowiedzi: jeden albo kilka (`1,3`), każdy z własnym kontekstem. Działają po jednym naraz (bramka
 przełącza je, gdy OpenCode prosi o inny), więc każdy jest oceniany osobno; ich pobrania się sumują. Potem setup
@@ -86,7 +89,7 @@ modelu z SSD: na laptopie testowym silnik wczytał się w 9,9 s, a pierwsza odpo
 Nowszy FastStrata rozpakowany obok zainstalowanego ustawia się przy pierwszym uruchomieniu tak samo: jego modele z ich
 kontekstami i bramka (przejęta albo zaproponowana); pliki modeli są użyte ponownie.
 
-Dla skryptu albo asystenta AI `--yes` wybiera każdą polecaną odpowiedź (polecany preset i jego kontekst); pełne
+Dla skryptu albo asystenta AI `--yes` wybiera każdą bezpieczną odpowiedź (bezpieczny preset i jego kontekst, pulpit taki, jak wykryto); pełne
 polecenie setupu laptopa testowego to
 
 ```bat

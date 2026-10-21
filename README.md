@@ -64,12 +64,14 @@ reports. The full table by card and preset: [docs/RESULTS.md](docs/RESULTS.md#wh
 
 1. **Download** [the zip][zip] and unzip it anywhere, or `git clone` [the repository][repo].
 2. **Run setup:** on Windows double-click **`START-HERE.bat`**; on Linux run **`./setup.sh`** in the folder. Press
-   Enter to take what it recommends.
+   Enter to take the safe choice.
 3. **Use it:** start the **FastStrata** shortcut, open OpenCode and pick a model of the provider **FastStrata**
    (setup put the gateway and OpenCode's config in place), or chat in the browser at `http://127.0.0.1:8080`.
 
-In step 2 setup checks the PC and recommends a preset and a context for it: Enter installs that one with no more
-questions. Or choose yourself from the four presets judged for this PC, with the speed measured on the test laptop and
+In step 2 setup first asks whether the NVIDIA card shows your desktop (a screen plugged into it); it finds out
+itself and offers that as the answer. A card that shows the desktop keeps some VRAM for it, so there the safe context is
+10% below the longest that fits (128K instead of 144K on a 6 GB card). Then it shows the safe choice for this PC, a
+preset and a context: Enter installs that one with no more questions. Or choose yourself from the four presets judged for this PC, with the speed measured on the test laptop and
 what each costs the answers: one or several (`1,3`), each with its own context. They run one at a time (the gateway
 swaps them when OpenCode asks for another), so each is judged on its own; their downloads add up. Then setup downloads
 the ready-made engine from FastStrata's latest release (155 MB: Windows, an NVIDIA card from RTX 20 to RTX 50 with
@@ -86,7 +88,7 @@ on the test laptop the engine loaded in 9.9 s and the first answer came at 27 to
 to the installed one sets itself up the same way on its first run: its models with their contexts, and the gateway
 (taken over, or offered); the model files are reused.
 
-For a script or an AI assistant, `--yes` takes every recommended answer (the recommended preset and its context);
+For a script or an AI assistant, `--yes` takes every safe answer (the safe preset and its context, the desktop as found);
 the test laptop's setup named in full is
 
 ```bat

@@ -1503,6 +1503,79 @@ def gpu_drives_display(g) -> bool:
     return text.strip().lower() == "enabled"
 
 
+def display_adapters() -> tuple | None:
+    """(the graphics that show the desktop now, every graphics of the PC): their names, from Windows'
+    EnumDisplayDevices or Linux's /sys/class/drm; None where neither says.  On a laptop the built-in screen is mostly
+    on the processor's graphics, and a screen in the HDMI port on the NVIDIA card.  Virtual screens (a headset's, a
+    remote desktop's) are left out."""
+    skip = ("virtual", "basic display", "remote")
+    if WIN:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class Device(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("DeviceName", wintypes.WCHAR * 32),
+                            ("DeviceString", wintypes.WCHAR * 128), ("StateFlags", wintypes.DWORD),
+                            ("DeviceID", wintypes.WCHAR * 128), ("DeviceKey", wintypes.WCHAR * 128)]
+            shown, every = [], []
+            for i in range(64):
+                d = Device()
+                d.cb = ctypes.sizeof(d)
+                if not ctypes.windll.user32.EnumDisplayDevicesW(None, i, ctypes.byref(d), 0):
+                    break
+                name = d.DeviceString.strip()
+                if not name or any(w in name.lower() for w in skip):
+                    continue
+                every += [] if name in every else [name]
+                if d.StateFlags & 1 and name not in shown:          # DISPLAY_DEVICE_ATTACHED_TO_DESKTOP
+                    shown.append(name)
+            return (shown, every) if every else None
+        except (OSError, AttributeError, ValueError):
+            return None
+    drm, vendors = Path("/sys/class/drm"), {"0x10de": "NVIDIA", "0x1002": "AMD", "0x8086": "Intel"}
+    try:
+        shown, every = [], []
+        for card in sorted(c for c in drm.glob("card*") if "-" not in c.name):
+            name = vendors.get((card / "device" / "vendor").read_text().strip())
+            if not name:
+                continue
+            name += " graphics"
+            every += [] if name in every else [name]
+            for port in drm.glob(card.name + "-*"):
+                on = (port / "enabled").read_text().strip() == "enabled" if (port / "enabled").exists() else True
+                if (port / "status").read_text().strip() == "connected" and on and name not in shown:
+                    shown.append(name)
+        return (shown, every) if every else None
+    except OSError:
+        return None
+
+
+def desktop_on_card(gpu) -> tuple:
+    """FASTSTRATA UX: (whether the NVIDIA card `gpu` shows the desktop: True, False, or None where nothing says; what
+    was found, in words).  The graphics that show it (display_adapters()) first, then nvidia-smi's display_active."""
+    found = display_adapters()
+    if found and found[0]:
+        others = [n for n in found[0] if "nvidia" not in n.lower()]
+        if len(others) < len(found[0]):
+            return True, "a screen is on the NVIDIA card" + (f", the others on {', '.join(others)}" if others else "")
+        return False, f"the desktop is on {', '.join(others)}"
+    text = out(["nvidia-smi", "-i", str(gpu.get("index", 0)), "--query-gpu=display_active", "--format=csv,noheader"])
+    state = text.strip().lower()
+    return {"enabled": (True, "nvidia-smi says a display is on the card"),
+            "disabled": (False, "nvidia-smi says no display is on the card")}.get(state, (None, ""))
+
+
+def ask_desktop(a, gpu) -> bool:
+    """FASTSTRATA UX: whether the NVIDIA card shows the desktop, asked with what setup found as Enter's answer (--yes
+    takes it; nothing found: no).  A card that shows it keeps VRAM for the desktop too, so the safe context is 10%
+    below the longest (faststrata_contexts())."""
+    found = gpu.get("desktop_found")
+    say("  Does the NVIDIA card show your desktop (a screen plugged into it, or the PC set to use it for the screen)?")
+    say("  Then it keeps some VRAM for the desktop, and the safe context is 10% below the longest that fits.")
+    return ask("Is the desktop on the NVIDIA card?", ["y", "n"], "y" if found else "n", a.yes) == "y"
+
+
 def gpu_compute_mode(index: int) -> str:
     """#1445: nvidia-smi's compute mode for this card ("Default", "Exclusive_Process", "Prohibited", ...); "" when it
     does not say."""
@@ -6122,21 +6195,6 @@ def faststrata_fit(family, model, ram, vram_gb) -> tuple:
     return faststrata_fit_info(family, model, ram, vram_gb)[:2]
 
 
-def faststrata_vram(gpu) -> tuple:
-    """(the VRAM FastStrata's presets are judged on, the GB its desktop and programs use now): the card's, less what
-    nvidia-smi reports in use when the card drives a display.  The 6 GB laptop's measurements had the card to
-    themselves (its desktop runs on the processor's graphics), with 0.1 to 0.2 GB left at 144K."""
-    if gpu.get("uma") or not gpu_drives_display(gpu):
-        return gpu["vram_gb"], 0.0
-    text = out(["nvidia-smi", "-i", str(gpu.get("index", 0)), "--query-gpu=memory.used",
-                "--format=csv,noheader,nounits"])
-    try:
-        used = float(text.strip().splitlines()[0]) / 1024
-    except (ValueError, IndexError):
-        return gpu["vram_gb"], 0.0
-    return max(0.0, gpu["vram_gb"] - used), used
-
-
 def faststrata_pick(ram, vram_gb, families=None) -> tuple | None:
     """(family, preset) setup recommends: the first of FASTSTRATA_PRESETS that runs a 32K context or more here, else the
     first that runs any; None when none fits."""
@@ -6156,12 +6214,20 @@ def faststrata_fit_text(family, model, ram, vram_gb) -> str:
     return "too big for this card"
 
 
-def faststrata_contexts(fit_ctx) -> tuple:
-    """(the contexts offered for a preset whose longest here is `fit_ctx` (0: it does not fit), the one recommended):
-    the longest that keeps the cache in 16 or 8 bits here, up to 144K (a longer prompt reads for minutes)."""
-    options = sorted(set(FASTSTRATA_CONTEXTS) | ({fit_ctx} if fit_ctx else set()))
+FASTSTRATA_DESKTOP_SHARE = 0.9   # a card that shows the desktop: the safe context is 10% below the longest
+
+
+def faststrata_contexts(fit_ctx, desktop=False) -> tuple:
+    """(the contexts offered for a preset whose longest here is `fit_ctx` (0: it does not fit), the safe one): the
+    longest that keeps the cache in 16 or 8 bits here, up to 144K (a longer prompt reads for minutes); where the card
+    shows the desktop (`desktop`), 10% below the longest, down to a multiple of 8K."""
     top = fit_ctx or FASTSTRATA_CONTEXTS[0]
-    return options, max(c for c in options if c <= min(top, 147456))
+    safe = min(top, 147456)
+    if desktop and fit_ctx:
+        safe = min(safe, int(fit_ctx * FASTSTRATA_DESKTOP_SHARE) // 8192 * 8192)
+    extra = {fit_ctx} | ({safe} if safe >= 16384 else set()) if fit_ctx else set()
+    options = sorted(set(FASTSTRATA_CONTEXTS) | extra)
+    return options, max(c for c in options if c <= max(safe, FASTSTRATA_CONTEXTS[0]))
 
 
 # ------------------------------------------------------------------------------------------------ FASTSTRATA MULTI
@@ -6210,7 +6276,7 @@ def faststrata_menu(a, gpu, ram, have=()) -> list:
     both; the recommended one installed here already skips the first."""
     a.model_named = bool(a.model)
     presets = [k for k in FASTSTRATA_PRESETS if a.model in (None, k[1])]
-    fit_vram = gpu.get("model_vram_gb", gpu["vram_gb"])
+    fit_vram = gpu["vram_gb"]
     least = min(presets, key=lambda k: poly_ram_need(FAMILIES[k[0]]["models"][k[1]], fit_vram))
     rec = faststrata_pick(ram, fit_vram) or least      # none fits: the one that wants the least
     rec = rec if rec in presets else least
@@ -6222,18 +6288,19 @@ def faststrata_menu(a, gpu, ram, have=()) -> list:
         installed[(ch["family"], ch["model"])] = ch["context"]
     pc = f"({gpu['name']}, {gpu['vram_gb']:.0f} GB of VRAM, {ram:.0f} GB of RAM)"
     if rec not in installed:
-        ctx = context_given(a, rec[1]) or faststrata_contexts(faststrata_fit(*rec, ram, fit_vram)[0])[1]
+        ctx = context_given(a, rec[1]) or faststrata_contexts(faststrata_fit(*rec, ram, fit_vram)[0],
+                                                              gpu.get("desktop_on_card"))[1]
         pr, size = FASTSTRATA_PRESETS[rec], FAMILIES[rec[0]]["models"][rec[1]]
-        say(f"  Recommended for this PC {pc}:")
+        say(f"  The safe choice for this PC {pc}:")
         say(f"  {preset_label(*rec)} ({rec[1]}) with a {ctx // 1024}K context, download {size['download_gb']:.0f} GB")
         say(f"     {faststrata_fit_text(*rec, ram, fit_vram)}; {pr['tok_s_37k']} tok/s; {pr['quality']}")
-        say("  1) Install the recommended one")
+        say("  1) Install the safe choice")
         say("  2) Choose the models myself: one or several, each with its own context")
         if ask("Which way?", ["1", "2"], "1", a.yes) == "1":
             return [{"family": rec[0], "model": rec[1], "context": ctx}]
         say()
     else:
-        say(f"  The recommended one, {preset_label(*rec)} ({rec[1]}), is installed here. Choose what to install or "
+        say(f"  The safe choice, {preset_label(*rec)} ({rec[1]}), is installed here. Choose what to install or "
             "change.")
     say(f"  Which models?  Judged for this PC {pc}.")
     say("  Each on its own: one runs at a time (the gateway swaps them when OpenCode asks for another).")
@@ -6244,7 +6311,7 @@ def faststrata_menu(a, gpu, ram, have=()) -> list:
                                                        if installed.get((f, m)) else
                                                        f"download {size['download_gb']:.0f} GB"))
         say(f"     {faststrata_fit_text(f, m, ram, fit_vram)}; {pr['tok_s_37k']} tok/s; {pr['quality']}"
-            + ("   (recommended)" if (f, m) == rec else ""))
+            + ("   (safe)" if (f, m) == rec else ""))
     say("  Several: their numbers, e.g. 1,3.")
     picked = [presets[i - 1] for i in ask_numbers("Which ones?", len(presets), presets.index(rec) + 1, a.yes)]
     picked.sort(key=lambda k: k != rec)                # the recommended one first: the gateway starts it first
@@ -6924,7 +6991,7 @@ def poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, adopted, sha
     names = list(sizes)
     if model_arg and model_arg not in names:
         fail(f"{title} has no {model_arg} model file", "choose one of: " + ", ".join(names))
-    vram = gpu.get("model_vram_gb", gpu["vram_gb"])   # FASTSTRATA UX: less the desktop's, where the card drives one
+    vram = gpu["vram_gb"]
     if multi:   # each card has its layers' dense weights; its own scratch and staging buffer cost ~2 GB a card more
         vram = sum(gpu_info(i)["vram_gb"] for i in multi) - 2.0 * (len(multi) - 1)
     # a FastStrata family: the first preset this PC has the RAM and VRAM for (poly_pick()); none: the PC is too small,
@@ -7034,7 +7101,7 @@ def poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, adopted, sha
             fail(f"--context {ctx}: {title} takes 16 to 1048576 tokens")
     elif fast:
         # the largest context that keeps the cache in 16 or 8 bits here, up to 144K (a longer prompt reads for minutes)
-        options, rec = faststrata_contexts(fit_ctx)
+        options, rec = faststrata_contexts(fit_ctx, gpu.get("desktop_on_card"))
         top = fit_ctx or FASTSTRATA_CONTEXTS[0]
         measured = faststrata_fit_info(family, model, ram, room)[2]
         say()
@@ -7047,8 +7114,10 @@ def poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, adopted, sha
             on = f"{preset_label(family, model)} on this card" if several else "This card"
             say(f"  {on}: up to {fit_ctx // 1024}K, " + (f"measured on {measured}." if measured else
                 "estimated (setup's estimate less 10%; reports from other PCs will correct it)."))
+            if gpu.get("desktop_on_card") and rec < min(fit_ctx, 147456):
+                say(f"  The desktop is on this card too: the safe context is {rec // 1024}K, 10% below the longest.")
         for i, c in enumerate(options, 1):
-            note = ("   (recommended)" if c == rec else "   (the longest" + ("" if measured else ", estimated") + ")"
+            note = ("   (safe)" if c == rec else "   (the longest" + ("" if measured else ", estimated") + ")"
                     if c == fit_ctx else "" if c <= top else "   (does not fit this card)")
             say(f"  {i}) {c // 1024}K tokens{note}")
         ctx = options[int(ask(f"Which context for {preset_label(family, model)}?" if several else "Which context?",
@@ -8640,10 +8709,11 @@ def main() -> int:
         warn(page_file_advice(pf, page_file_setting()))
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     if not hip and fam0 in FASTSTRATA_FAMILIES:        # FASTSTRATA UX: a desktop on the card takes its share
-        gpu["model_vram_gb"], used = faststrata_vram(gpu)
-        if used:
-            warn(f"this card drives a display: the desktop and programs use {used:.1f} GB of its VRAM now, so the "
-                 f"model is judged on the {gpu['model_vram_gb']:.1f} GB left (close what you can before starting it)")
+        gpu["desktop_found"], why = desktop_on_card(gpu)
+        if gpu["desktop_found"]:
+            warn(f"display: {why}; the desktop takes some of the card's VRAM (step 2 asks)")
+        elif why:
+            ok(f"display: {why}; the NVIDIA card is free for the model")
     link = None if hip else pcie_link(int(gpu.get("index", 0)))
     if link is not None:                               # the engine measures the link itself: a detail here
         line, problem = pcie_lines(link)
@@ -8729,6 +8799,9 @@ def main() -> int:
 
     # ---- 2. the questions
     step(2, "your choices")
+    if not hip and fam0 in FASTSTRATA_FAMILIES:        # FASTSTRATA UX: the desktop's VRAM sets the safe context
+        gpu["desktop_on_card"] = ask_desktop(a, gpu)
+        say()
     fams = menu_families(hip)
     picks = getattr(a, "picks", None)                  # FASTSTRATA MULTI: an earlier install's FastStrata models
     if picks is None and a.models:                     # --models, or --model more than once: no menu

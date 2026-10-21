@@ -69,17 +69,37 @@ class TestTheFitIsWhatWasMeasured(unittest.TestCase):
         self.assertEqual(setup.faststrata_fit_text("qwen36", "UD-Q3_K_M", 64.0, 2.0), "too big for this card")
 
 
-class TestACardThatDrivesADisplay(unittest.TestCase):
-    def test_it_is_judged_on_what_its_desktop_leaves(self):
-        with mock.patch.object(setup, "gpu_drives_display", return_value=True), \
-             mock.patch.object(setup, "out", return_value="716\n"):
-            left, used = setup.faststrata_vram({"index": 0, "vram_gb": 6.0})
-        self.assertAlmostEqual(used, 716 / 1024)
-        self.assertAlmostEqual(left, 6.0 - 716 / 1024)
+class TestTheDesktop(unittest.TestCase):
+    def test_a_screen_on_the_nvidia_card_is_found(self):
+        """The test laptop with a monitor in its HDMI port: the built-in screen on the Radeon, the other on the card."""
+        both = (["AMD Radeon(TM) Graphics", "NVIDIA GeForce RTX 3060 Laptop GPU"],
+                ["AMD Radeon(TM) Graphics", "NVIDIA GeForce RTX 3060 Laptop GPU"])
+        with mock.patch.object(setup, "display_adapters", return_value=both):
+            on, why = setup.desktop_on_card({"index": 0})
+        self.assertTrue(on)
+        self.assertIn("the others on AMD Radeon(TM) Graphics", why)
 
-    def test_one_that_does_not_is_judged_whole(self):
-        with mock.patch.object(setup, "gpu_drives_display", return_value=False):
-            self.assertEqual(setup.faststrata_vram({"index": 0, "vram_gb": 6.0}), (6.0, 0.0))
+    def test_a_desktop_on_the_processors_graphics_leaves_the_card_free(self):
+        only = (["AMD Radeon(TM) Graphics"], ["AMD Radeon(TM) Graphics", "NVIDIA GeForce RTX 3060 Laptop GPU"])
+        with mock.patch.object(setup, "display_adapters", return_value=only):
+            self.assertEqual(setup.desktop_on_card({"index": 0}),
+                             (False, "the desktop is on AMD Radeon(TM) Graphics"))
+
+    def test_nothing_found_asks_nvidia_smi(self):
+        with mock.patch.object(setup, "display_adapters", return_value=None), \
+             mock.patch.object(setup, "out", return_value="Enabled\n"):
+            self.assertTrue(setup.desktop_on_card({"index": 0})[0])
+        with mock.patch.object(setup, "display_adapters", return_value=None), \
+             mock.patch.object(setup, "out", return_value=""):
+            self.assertEqual(setup.desktop_on_card({"index": 0}), (None, ""))
+
+    def test_the_safe_context_is_10_percent_below_the_longest(self):
+        self.assertEqual(setup.faststrata_contexts(147456)[1], 147456)
+        self.assertEqual(setup.faststrata_contexts(147456, desktop=True)[1], 131072)   # 129.6K, down to 8K steps
+        self.assertEqual(setup.faststrata_contexts(32768, desktop=True)[1], 24576)
+        options, safe = setup.faststrata_contexts(253952, desktop=True)                # an 8 GB card: 144K stays
+        self.assertEqual(safe, 147456)
+        self.assertIn(253952, options)
 
 
 class TestTheRecommendation(unittest.TestCase):

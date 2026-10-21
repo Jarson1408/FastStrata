@@ -34,6 +34,7 @@ SMALL = dict(LAPTOP, ram=11.8)
 ENGINE = (b"usage: strata-poly\n  --threads N\n  --cpu-multi\n  --suffix-drafts MIB\n  --kv-q8\n  --kv-q4\n"
           b"  --kv-q4-keys q8|q4\n  --attn-split\n  --graph-experts\n  --prompt-batch N\n  --elastic-prefill N\n"
           b"  --conversation-cache-mib N\n  --conversation-cache-slots N\n  --tail-skip N\n")
+DESKTOP = "Is the desktop on the NVIDIA card"     # step 2's first question (FASTSTRATA UX)
 GATEWAY = ("Install the FastStrata Gateway (the app between OpenCode and the model: tool calls, model swaps, project "
            "memory)")
 Q4, Q3, QUALITY, COMPACT = ("strata-qwen36-ud-q4_k_m.json", "strata-qwen36-ud-q3_k_m.json",
@@ -122,6 +123,7 @@ class Machine:
             mock.patch.object(setup, "amd_gpus", lambda *a, **k: []),
             mock.patch.object(setup, "pcie_link", lambda i: None),
             mock.patch.object(setup, "gpu_drives_display", lambda g: False),
+            mock.patch.object(setup, "desktop_on_card", lambda g: (False, "")),
             mock.patch.object(setup, "ram_gb", lambda: self.machine["ram"]),
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", True, False)),
             mock.patch.object(setup, "cpu_cores", lambda: None),
@@ -199,10 +201,10 @@ class TheRecommendedWay(Case):
         """The 6 GB laptop: Q4 with 144K, as measured there; no question about the model or the context."""
         code, out = self.m.run(answers={})
         self.assertEqual(code, 0, out)
-        self.assertIn("Recommended for this PC (NVIDIA GeForce RTX 3060 Laptop GPU, 6 GB of VRAM, 60 GB of RAM):", out)
+        self.assertIn("The safe choice for this PC (NVIDIA GeForce RTX 3060 Laptop GPU, 6 GB of VRAM, 60 GB of RAM):", out)
         self.assertIn("Qwen3.6-35B-A3B Q4 (UD-Q4_K_M) with a 144K context, download 23 GB", out)
         self.assertIn("fits this PC, up to 144K context (measured on a 6 GB card); 66.9 tok/s; the most exact", out)
-        self.assertEqual(self.m.questions, ["Which way", "Do you want images", "Keep conversations in RAM", GATEWAY])
+        self.assertEqual(self.m.questions, [DESKTOP, "Which way", "Do you want images", "Keep conversations in RAM", GATEWAY])
         self.assertNotIn("Which models?", out)
         self.assertEqual(arg(self.m.config(Q4), "--max-context"), "147456")
         self.assertEqual([p.name for p in self.m.t.glob("strata-*.json")], [Q4])
@@ -242,7 +244,7 @@ class ChoosingSeveral(Case):
         code, out = self.m.run(answers={"Which way": "2", "Which ones": "1,3",
                                         "Which context for Qwen3.6-35B-A3B Q4": "3"})
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.m.questions, ["Which way", "Which ones", "Do you want images",
+        self.assertEqual(self.m.questions, [DESKTOP, "Which way", "Which ones", "Do you want images",
                                             "Which context for Qwen3.6-35B-A3B Q4", "Keep conversations in RAM",
                                             "Which context for Ornith 1.5 35B-A3B Quality", GATEWAY])
         self.assertEqual(arg(self.m.config(Q4), "--max-context"), "65536")
@@ -273,8 +275,9 @@ class ChoosingSeveral(Case):
         self.assertIn("Which context", self.m.questions)        # asked: this way chooses the context too
 
     def test_a_wrong_answer_is_asked_again(self):
-        # in order, whatever the question: 2, two wrong answers, then Q3 and Compact; Enter for the rest
-        code, out = self.m.run(answers=_Seq(iter(["2", "1,7", "x", "2 4"])))
+        # in order, whatever the question: the desktop not on the card, 2, two wrong answers, then Q3 and Compact;
+        # Enter for the rest
+        code, out = self.m.run(answers=_Seq(iter(["n", "2", "1,7", "x", "2 4"])))
         self.assertEqual(code, 0, out)
         self.assertEqual(out.count("please answer with numbers from 1 to 4"), 2)
         self.assertTrue(self.m.config(Q3) and self.m.config(COMPACT))
@@ -411,7 +414,7 @@ class TheOptions(Case):
         code, out = self.m.run(["--model", "UD-Q4_K_M", "--context", "147456"])
         self.assertEqual(code, 0, out)
         self.assertIn("[ok] model: Qwen3.6-35B-A3B", out)
-        self.assertNotIn("Recommended for this PC", out)
+        self.assertNotIn("The safe choice for this PC", out)
         self.assertEqual(arg(self.m.config(Q4), "--max-context"), "147456")
 
     def test_help_names_them(self):
@@ -431,7 +434,7 @@ class SetupRunAgain(Case):
         code, out = self.m.run(["--setup"], answers={"Which ones": "3"})
         self.assertEqual(code, 0, out)
         self.assertNotIn("Which way", self.m.questions)
-        self.assertIn("The recommended one, Qwen3.6-35B-A3B Q4 (UD-Q4_K_M), is installed here.", out)
+        self.assertIn("The safe choice, Qwen3.6-35B-A3B Q4 (UD-Q4_K_M), is installed here.", out)
         self.assertIn("1) Qwen3.6-35B-A3B Q4 (UD-Q4_K_M), installed here (144K)", out)
         self.assertIsNotNone(self.m.config(QUALITY))
 

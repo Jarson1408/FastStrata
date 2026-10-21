@@ -478,6 +478,7 @@ class Install(unittest.TestCase):
             mock.patch.object(setup, "amd_pci_devices", lambda *a, **k: []),
             mock.patch.object(setup, "pcie_link", lambda i: None),
             mock.patch.object(setup, "gpu_drives_display", lambda g: False),
+            mock.patch.object(setup, "desktop_on_card", lambda g: (False, "")),
             mock.patch.object(setup, "ram_gb", lambda: machine["ram"]),
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", machine["avx2"], False)),
             mock.patch.object(setup, "cpu_floor", lambda avx2: "" if avx2 else "none"),
@@ -562,7 +563,7 @@ class Install(unittest.TestCase):
         code, out, cfg = self.laptop(answers={})
         self.assertEqual(code, 0, out)
         self.assertEqual([q.split("?")[0].strip() for q in self.asked],
-                         ["Do you want images", "Keep conversations in RAM"])
+                         ["Is the desktop on the NVIDIA card", "Do you want images", "Keep conversations in RAM"])
         self.assertIn("--kv-q8", cfg["args"])
         self.assertIn("attention cache: 8 bits, so 144K fits this card", out)
         self.assertNotIn("Go on anyway", out)
@@ -677,11 +678,11 @@ class Install(unittest.TestCase):
         self.assertTrue(menu[4].strip().startswith("3) Ornith 1.5 35B-A3B Quality (APEX-I-QUALITY)"), menu)
         self.assertTrue(menu[5].strip().startswith("4) Ornith 1.5 35B-A3B Compact (APEX-I-COMPACT)"), menu)
         # an 8 GB card: no measurement, so setup's estimate less 10%, said to be one
-        self.assertIn("fits this PC, up to 248K context (estimated); 66.9 tok/s; the most exact   (recommended)", out)
+        self.assertIn("fits this PC, up to 248K context (estimated); 66.9 tok/s; the most exact   (safe)", out)
         asked = [q.split("?")[0].strip() for q in self.asked]
-        self.assertEqual(asked[:2], ["Which way", "Which ones"])
+        self.assertEqual(asked[:3], ["Is the desktop on the NVIDIA card", "Which way", "Which ones"])
         self.assertNotIn("Size", asked)
-        self.assertEqual(asked[2:4], ["Do you want images", "Which context"])
+        self.assertEqual(asked[3:5], ["Do you want images", "Which context"])
         for title in ("Qwen3.8-Flash-Next", "GLM 5.3 Flash", "DeepSeek", "Gemma 4", "Tiel Coder"):
             self.assertFalse(any(title in ln for ln in menu), title)
         self.assertEqual(cfg["model_name"], "qwen3.6-35b-a3b-ud-q4_k_m")

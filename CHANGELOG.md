@@ -5,6 +5,13 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
+## Unreleased
+
+- Setup asks whether the NVIDIA card shows the desktop, with what it found as the answer (Windows: the screens
+  Windows lists for each graphics; Linux: /sys/class/drm; else nvidia-smi). Where it does, the safe context is 10%
+  below the longest that fits (128K instead of 144K on a 6 GB card); the VRAM in use is no longer taken off the card.
+- Step 2's first choice is called the safe one.
+
 ## v0.1.0 - 2026-10-21
 
 The first release: Qwen3.6-35B-A3B and Ornith 1.5 on one NVIDIA card and system RAM, four presets.
