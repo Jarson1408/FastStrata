@@ -477,6 +477,7 @@ class Install(unittest.TestCase):
             mock.patch.object(setup, "amd_device_access_problem", lambda *a, **k: None),
             mock.patch.object(setup, "amd_pci_devices", lambda *a, **k: []),
             mock.patch.object(setup, "pcie_link", lambda i: None),
+            mock.patch.object(setup, "gpu_drives_display", lambda g: False),
             mock.patch.object(setup, "ram_gb", lambda: machine["ram"]),
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", machine["avx2"], False)),
             mock.patch.object(setup, "cpu_floor", lambda avx2: "" if avx2 else "none"),
@@ -533,12 +534,13 @@ class Install(unittest.TestCase):
         code, out, cfg = self.install(LAPTOP, ["--model", "UD-Q3_K_M", "--context", "147456"])
         self.assertEqual(code, 0, out)
         got = options(cfg["args"])
-        # its dense weights take 0.1 GB more VRAM by setup's estimate, so 144K takes the 4-bit cache; its IQ3_XXS
-        # experts take neither --cpu-multi nor --graph-experts (the engine would ignore them)
+        # 144K in 8 bits, as step 10 ran it on the 6 GB laptop (the estimate alone, which takes its dense weights for
+        # 0.1 GB more, would give the 4-bit cache); its IQ3_XXS experts take neither --cpu-multi nor --graph-experts
         self.assertEqual(set(got) - {"--max-context", "--conversation-cache-mib", "--tail-skip"},
                          set(options(DAILY)) - {"--max-context", "--conversation-cache-mib", "--tail-skip",
-                                                "--cpu-multi", "--graph-experts", "--kv-q8"} | {"--kv-q4"})
-        self.assertIn("does not fit the card with the attention cache in 8 bits either", out)
+                                                "--cpu-multi", "--graph-experts"})
+        self.assertIn("--kv-q8", got)
+        self.assertIn("attention cache: 8 bits, as measured on a 6 GB card at 144K", out)
         self.assertIn("size: UD-Q3_K_M; its speed was measured with FastStrata's options", out)
         self.assertIn("with Qwen3.6-35B-A3B UD-Q3_K_M in step 10", out)
         self.assertIn("--cpu-multi left out: this size's experts", out)
@@ -672,7 +674,8 @@ class Install(unittest.TestCase):
         self.assertTrue(menu[1].strip().startswith("2) Qwen3.6-35B-A3B Q3 (UD-Q3_K_M)"), menu)
         self.assertTrue(menu[2].strip().startswith("3) Ornith 1.5 35B-A3B Quality (APEX-I-QUALITY)"), menu)
         self.assertTrue(menu[3].strip().startswith("4) Ornith 1.5 35B-A3B Compact (APEX-I-COMPACT)"), menu)
-        self.assertIn("fits this PC, up to 256K context; 66.9 tok/s; the most exact   (recommended)", out)
+        # an 8 GB card: no measurement, so setup's estimate less 10%, said to be one
+        self.assertIn("fits this PC, up to 248K context (estimated); 66.9 tok/s; the most exact   (recommended)", out)
         asked = [q.split("?")[0].strip() for q in self.asked]
         self.assertEqual(asked[0], "Which one")
         self.assertNotIn("Size", asked)

@@ -249,7 +249,7 @@ FastStrata, prompt wypełniający kontekst, potem 256 napisanych tokenów:
 | --- | --- | --- |
 | **4 GB: minimum** | Krótki kontekst. UD-Q3_K_M działa z 16K do 48K, UD-Q4_K_M i APEX-I-COMPACT z 32K, wszystkie z pamięcią 8-bitową, pisząc 42–56 tok/s. 16K to najmniejszy kontekst, jaki proponuje setup; 32K to najmniej, z czym agent programistyczny taki jak OpenCode pracuje wygodnie. | Zmierzone na symulowanej karcie 4 GB (3082 MiB wolne), [wyżej](#na-karcie-4-gb-do-gier) |
 | **6 GB: rozsądnie** | **Q4 (UD-Q4_K_M) z pamięcią 8-bitową przy 144K**: każdy wynik na tej stronie. | Zmierzone: [komputer testowy](#komputer-testowy) |
-| **8 GB: optymalnie** | Q4 z pamięcią 8-bitową aż do całego okna modelu 256K albo 144K z pamięcią 16-bitową, i więcej ekspertów w VRAM. | Szacunek setupu; nie mierzono z FastStrata (PolyStrata uruchamiała te presety na laptopowej karcie 8 GB) |
+| **8 GB: optymalnie** | Q4 z pamięcią 8-bitową przy około 248K (Ornith całe okno 256K) albo 144K z pamięcią 16-bitową, i więcej ekspertów w VRAM. | Szacunek setupu pomniejszony o 10%; nie mierzono z FastStrata (PolyStrata uruchamiała te presety na laptopowej karcie 8 GB) |
 
 Ustawienie do wybrania: **Q4 i pamięć 8-bitowa** (`--kv-q8`). Setup poleca je na karcie 6 lub 8 GB i komputerze z
 około 25 GB RAM wolnymi dla niego; na karcie 4 GB poleca mniejszy Q3.
@@ -264,13 +264,14 @@ około 25 GB RAM wolnymi dla niego; na karcie 4 GB poleca mniejszy Q3.
 
 Co menu setupu mówi o każdym presecie, według karty: najdłuższy kontekst, jaki proponuje z pamięcią 16- lub
 8-bitową, i RAM, którego chce (w GiB, tak jak podaje go system; komputer „32 GB” podaje trochę mniej niż 32). Wiersze
-6 GB i 4 GB zmierzono, pozostałe to szacunek setupu:
+6 GB i 4 GB zmierzono przy całej wolnej karcie; pozostałe, i karta, której część VRAM zajmuje pulpit, dostają szacunek
+setupu pomniejszony o 10%, a menu pisze „estimated”. Zgłoszenia z innych komputerów zastąpią szacunki:
 
 | Karta | Qwen3.6-35B-A3B | Ornith 1.5 |
 | --- | --- | --- |
-| 4 GB | UD-Q4_K_M 32K od 26,1 GB RAM, UD-Q3_K_M 48K od 20,6 | APEX-I-QUALITY 32K od 27,6, APEX-I-COMPACT 32K od 21,8 |
-| 6 GB | UD-Q4_K_M 144K od 24,7, UD-Q3_K_M 128K od 19,3 | APEX-I-QUALITY 144K od 25,9, APEX-I-COMPACT 144K od 19,9 |
-| 8 GB | UD-Q4_K_M 256K od 22,6, UD-Q3_K_M 256K od 17,2 | APEX-I-QUALITY 256K od 23,7, APEX-I-COMPACT 256K od 17,7 |
+| 4 GB | UD-Q4_K_M 32K od 26,1 GB RAM, UD-Q3_K_M 48K od 20,6 | APEX-I-QUALITY 24K (szacunek) od 27,6, APEX-I-COMPACT 32K od 21,8 |
+| 6 GB | UD-Q4_K_M 144K od 24,7, UD-Q3_K_M 144K od 19,3 | APEX-I-QUALITY 144K od 25,9, APEX-I-COMPACT 144K od 19,9 |
+| 8 GB | UD-Q4_K_M 248K od 22,6, UD-Q3_K_M 240K od 17,2 | APEX-I-QUALITY 256K od 23,7, APEX-I-COMPACT 256K od 17,7 |
 | 12 GB | UD-Q4_K_M od 18,3, UD-Q3_K_M od 12,9 | APEX-I-QUALITY od 19,4, APEX-I-COMPACT od 13,4 |
 | 16 GB | UD-Q4_K_M od 14,0 | APEX-I-QUALITY od 15,1 |
 
@@ -324,7 +325,8 @@ wczytał się w 9,9 s, a pierwsza odpowiedź przyszła z prędkością 27 tok/s;
 Po modelu setup proponuje [FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway), aplikację między
 [OpenCode](https://opencode.ai) a modelem. Zamienia wywołania narzędzi modelu na takie, które OpenCode czyta, przerywa
 turę, która się zapętla, uruchamia model, gdy OpenCode o niego prosi, i przełącza go na inny zainstalowany preset, oraz
-prowadzi pamięć projektu LODESTAR (włączoną, z wyłącznikiem). Po odpowiedzi „tak” setup:
+prowadzi pamięć projektu [LODESTAR](#lodestar-pamięć-projektu-dla-małego-modelu) (na starcie wyłączoną, z
+przełącznikiem). Po odpowiedzi „tak” setup:
 
 - umieszcza bramkę w `gateway\` w tym folderze, z własnym środowiskiem Pythona (około 300 MB);
 - wpisuje zainstalowane presety do jej ustawień, każdy z kontekstem, który setup wybrał dla tego komputera;
@@ -333,11 +335,30 @@ prowadzi pamięć projektu LODESTAR (włączoną, z wyłącznikiem). Po odpowied
 - wpisuje presety do konfiguracji OpenCode (`~/.config/opencode/opencode.json`, dostawca `faststrata`), zachowując
   kopię `.bak` i nie ruszając reszty pliku; folder tworzy, gdy go nie ma;
 - tworzy na pulpicie skrót **FastStrata**, który otwiera aplikację bramki; aplikacja uruchamia model, gdy OpenCode o
-  niego prosi, a jej zamknięcie zwalnia kartę i RAM.
+  niego prosi, a jej zamknięcie zwalnia kartę i RAM. Start modelu trwa około minuty na testowym laptopie 6 GB: pierwsza
+  odpowiedź po otwarciu aplikacji albo po przełączeniu na inny model czeka na niego, a OpenCode czeka razem z nią.
 
 W OpenCode wybierz model dostawcy FastStrata. Później albo na instalacji zrobionej bez niej: `START-HERE.bat --gateway
 on` (`./setup.sh --gateway on`). Z `--yes` setup ją pomija, chyba że podasz `--gateway on`; `--opencode install|skip`
 i `--no-shortcut` odpowiadają na resztę.
+
+### LODESTAR: pamięć projektu dla małego modelu
+
+Model z 3B aktywnych parametrów czyta pliki z poleceniami projektu (`README.md`, `AGENTS.md`), ale nie trzyma się ich
+w długim zadaniu: pomija kroki i zapomina, co ustalono. LODESTAR to protokół bramki, który temu zapobiega. Po instalacji
+jest wyłączony; pole **Enforce LODESTAR Memory Protocol** w aplikacji (albo *LODESTAR Protocol* w menu w zasobniku)
+włącza go i wyłącza w każdej chwili.
+
+- **Wdrożenie do projektu.** Przycisk **Deploy Template** w aplikacji (albo *Deploy LODESTAR Template...* w zasobniku)
+  kopiuje `AGENTS.md`, `CLAUDE.md` i folder `.context/` do wybranego folderu projektu. Protokół działa w folderze, do
+  którego go wdrożono.
+- **Pamięć w sesji.** Z włączonym LODESTAR bramka trzyma model w jednym cyklu na zadanie: zanim zmieni plik, czyta
+  zasady i pamięć projektu i zapisuje cel oraz kroki w `.context/memory/active-context.md`; na końcu zapisuje, co
+  zrobiono, i zamyka cel. Przerwana sesja albo nowa zaczyna tam, gdzie skończyła poprzednia.
+- **Pamięć semantyczna dla długich projektów.** Lekcja z każdego skończonego zadania trafia do
+  `.context/semantic-memory/` i jest wyszukiwana na początku następnego. Działa przez
+  `python .context/semantic-memory/embed.py`, który potrzebuje `sentence-transformers` w tym Pythonie
+  (`pip install sentence-transformers`; pobiera PyTorch). Własne środowisko bramki go nie instaluje.
 
 ### Gdy setup się zatrzyma
 

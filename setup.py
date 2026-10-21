@@ -699,17 +699,21 @@ POLY_CONTEXTS = [8192, 32768, 65536, 131072]
 # (README "Results", docs/OPTIMIZATION_LOG.md step 10): writing after a 37K prompt on the 6 GB laptop, and what its
 # answers cost against the family's most exact file.  The 4 GB contexts are the ones measured on a simulated 4 GB card
 # with --kv-q8 (3,082 MiB free to the engine): setup's estimate takes a 32 GB card's buffers and calls such a card too
-# small for any context.
+# small for any context.  The 6 GB one is what step 10 ran every preset with on the 6 GB laptop (--max-context 147456,
+# --kv-q8, a 139K prompt, nothing paged to system RAM): the estimate gives UD-Q3_K_M, whose dense weights it takes for
+# 0.1 GB more, only 128K there.
 FASTSTRATA_CONTEXTS = [16384, 32768, 65536, 131072, 147456, 262144]
 FASTSTRATA_PRESETS = {
     ("qwen36", "UD-Q4_K_M"): {"name": "Q4", "tok_s_37k": 66.9, "quality": "the most exact",
-                              "on_4gb": 32768},
+                              "on_4gb": 32768, "on_6gb": 147456},
     ("qwen36", "UD-Q3_K_M"): {"name": "Q3", "tok_s_37k": 58.6,
-                              "quality": "a little less exact than Q4 (mean KL 0.020)", "on_4gb": 49152},
-    ("ornith", "APEX-I-QUALITY"): {"name": "Quality", "tok_s_37k": 39.6, "quality": "Ornith's most exact"},
+                              "quality": "a little less exact than Q4 (mean KL 0.020)", "on_4gb": 49152,
+                              "on_6gb": 147456},
+    ("ornith", "APEX-I-QUALITY"): {"name": "Quality", "tok_s_37k": 39.6, "quality": "Ornith's most exact",
+                                   "on_6gb": 147456},
     ("ornith", "APEX-I-COMPACT"): {"name": "Compact", "tok_s_37k": 56.2,
                                    "quality": "less exact than Quality (mean KL 0.088), not for code",
-                                   "on_4gb": 32768},
+                                   "on_4gb": 32768, "on_6gb": 147456},
 }
 GLM_ROW_BYTES = 28160           # VRAM per context token: a row in each of the 11 sparse attention layers' caches
 GLM_VRAM_BESIDE_GB = 12         # what is not expert cache on a 32 GB card at 32K (weights, caches, buffers, reserve):
@@ -6029,22 +6033,72 @@ def poly_pick(sizes, ram, vram_gb, hip=False) -> str | None:
     return next((m for m, d in sizes.items() if poly_fits(d, ram, vram_gb, hip)), None)
 
 
-def faststrata_fit(family, model, ram, vram_gb) -> tuple:
-    """(the largest of FASTSTRATA_CONTEXTS this PC runs a FastStrata preset with and keeps the attention cache in 16 or
-    8 bits, that cache); (0, "") when it does not fit.  Setup's estimate (poly_kv_plan()) for a card of 5.5 GB or more,
-    which matched the 6 GB laptop (144K in 8 bits); the context measured on a simulated 4 GB card for a smaller one."""
+FASTSTRATA_ESTIMATE_SHARE = 0.9    # an estimated context is setup's estimate less 10%, until reports from other PCs
+
+
+def faststrata_measured(family, model, vram_gb) -> str:
+    """The measurement that holds for a preset on this much free VRAM: "a 6 GB card" (step 10's laptop, the whole card
+    free, 0.1 to 0.2 GB left at 144K: 5.9 GB free or more, under 7), "a simulated 4 GB card" (3,082 MiB free: 3 GB
+    free or more, under 4.5), or "" where none was made and setup estimates."""
+    pr = FASTSTRATA_PRESETS.get((family, model), {})
+    if 5.9 <= vram_gb < 7 and pr.get("on_6gb"):
+        return "a 6 GB card"
+    if 3.0 <= vram_gb < 4.5 and pr.get("on_4gb"):
+        return "a simulated 4 GB card"
+    return ""
+
+
+def faststrata_estimate(family, model, vram_gb) -> int:
+    """The longest context setup's estimate (poly_kv_plan()) fits on `vram_gb` with the cache in 16 or 8 bits, less 10%
+    and down to a multiple of 8K; 0 below 16K.  Only a 6 GB card and a simulated 4 GB card were measured: the margin
+    stands until reports from other PCs say how close the estimate is."""
+    fam = FAMILIES[family]
+    d = fam["models"][model]
+    longest = 0                                        # up to the model's window and the margin above it, so a card
+    for ctx in range(16384, int(262144 / FASTSTRATA_ESTIMATE_SHARE) + 4096, 4096):   # that holds both keeps all 256K
+        cache, _batch, fits = poly_kv_plan(fam, d, ctx, vram_gb)
+        if fits and cache in ("f16", "q8"):
+            longest = ctx
+    est = min(262144, int(longest * FASTSTRATA_ESTIMATE_SHARE) // 8192 * 8192)
+    return est if est >= 16384 else 0
+
+
+def faststrata_fit_info(family, model, ram, vram_gb) -> tuple:
+    """(the longest context this PC runs a FastStrata preset with, the cache in 16 or 8 bits; that cache; what it comes
+    from: the card size it was measured on, or "" for setup's estimate less 10%); (0, "", "") when it does not fit.
+    Where a measurement holds (faststrata_measured()) it is taken, even where the estimate says more: it is what is
+    known to run.  Elsewhere -- a larger card, or a 6 GB one with its desktop on it -- the estimate less 10%."""
     d = FAMILIES[family]["models"][model]
     if ram < poly_ram_need(d, vram_gb) - 4:
-        return 0, ""
-    best = (0, "")
-    for ctx in FASTSTRATA_CONTEXTS:
-        cache, _batch, fits = poly_kv_plan(FAMILIES[family], d, ctx, vram_gb)
-        if fits and cache in ("f16", "q8"):
-            best = (ctx, cache)
-    measured = FASTSTRATA_PRESETS.get((family, model), {}).get("on_4gb")
-    if best[0] == 0 and measured and 3.5 <= vram_gb < 5.5:
-        best = (measured, "q8")
-    return best
+        return 0, "", ""
+    pr = FASTSTRATA_PRESETS.get((family, model), {})
+    measured = faststrata_measured(family, model, vram_gb)
+    if measured:
+        return (pr["on_6gb"] if measured.startswith("a 6") else pr["on_4gb"]), "q8", measured
+    est = faststrata_estimate(family, model, vram_gb)
+    if not est:
+        return 0, "", ""
+    return est, poly_kv_plan(FAMILIES[family], d, est, vram_gb)[0], ""
+
+
+def faststrata_fit(family, model, ram, vram_gb) -> tuple:
+    """(the longest context, its cache) of faststrata_fit_info(); (0, "") when the preset does not fit."""
+    return faststrata_fit_info(family, model, ram, vram_gb)[:2]
+
+
+def faststrata_vram(gpu) -> tuple:
+    """(the VRAM FastStrata's presets are judged on, the GB its desktop and programs use now): the card's, less what
+    nvidia-smi reports in use when the card drives a display.  The 6 GB laptop's measurements had the card to
+    themselves (its desktop runs on the processor's graphics), with 0.1 to 0.2 GB left at 144K."""
+    if gpu.get("uma") or not gpu_drives_display(gpu):
+        return gpu["vram_gb"], 0.0
+    text = out(["nvidia-smi", "-i", str(gpu.get("index", 0)), "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits"])
+    try:
+        used = float(text.strip().splitlines()[0]) / 1024
+    except (ValueError, IndexError):
+        return gpu["vram_gb"], 0.0
+    return max(0.0, gpu["vram_gb"] - used), used
 
 
 def faststrata_pick(ram, vram_gb, families=None) -> tuple | None:
@@ -6057,9 +6111,9 @@ def faststrata_pick(ram, vram_gb, families=None) -> tuple | None:
 
 def faststrata_fit_text(family, model, ram, vram_gb) -> str:
     """What the menu says of a preset on this PC."""
-    ctx, _cache = faststrata_fit(family, model, ram, vram_gb)
+    ctx, _cache, measured = faststrata_fit_info(family, model, ram, vram_gb)
     if ctx:
-        return f"fits this PC, up to {ctx // 1024}K context"
+        return f"fits this PC, up to {ctx // 1024}K context ({'measured on ' + measured if measured else 'estimated'})"
     d = FAMILIES[family]["models"][model]
     if ram < poly_ram_need(d, vram_gb) - 4:
         return f"too big for this PC's RAM (wants about {poly_ram_need(d, vram_gb):.0f} GB)"
@@ -6609,7 +6663,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     names = list(sizes)
     if a.model and a.model not in names:
         fail(f"{title} has no {a.model} model file", "choose one of: " + ", ".join(names))
-    vram = gpu["vram_gb"]
+    vram = gpu.get("model_vram_gb", gpu["vram_gb"])   # FASTSTRATA UX: less the desktop's, where the card drives one
     if multi:   # each card has its layers' dense weights; its own scratch and staging buffer cost ~2 GB a card more
         vram = sum(gpu_info(i)["vram_gb"] for i in multi) - 2.0 * (len(multi) - 1)
     # a FastStrata family: the first preset this PC has the RAM and VRAM for (poly_pick()); none: the PC is too small,
@@ -6712,16 +6766,22 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
             fail(f"--context {ctx}: {title} takes 16 to 1048576 tokens")
     elif fast:
         # the largest context that keeps the cache in 16 or 8 bits here, up to 144K (a longer prompt reads for minutes)
-        good = [c for c in FASTSTRATA_CONTEXTS if c <= max(fit_ctx, FASTSTRATA_CONTEXTS[0])]
-        rec = max(c for c in good if c <= 147456)
+        options = sorted(set(FASTSTRATA_CONTEXTS) | ({fit_ctx} if fit_ctx else set()))
+        top = fit_ctx or FASTSTRATA_CONTEXTS[0]
+        rec = max(c for c in options if c <= min(top, 147456))
+        measured = faststrata_fit_info(family, model, ram, room)[2]
         say()
         say("  Context = how much the model sees at once (the chat, files, tool output). OpenCode works best with a long")
         say("  one; a longer one costs VRAM, and a long prompt takes a while to read the first time.")
-        for i, c in enumerate(FASTSTRATA_CONTEXTS, 1):
-            note = "   (recommended)" if c == rec else "" if c in good else "   (does not fit this card)"
+        if fit_ctx:
+            say(f"  This card: up to {fit_ctx // 1024}K, " + (f"measured on {measured}." if measured else
+                "estimated (setup's estimate less 10%; reports from other PCs will correct it)."))
+        for i, c in enumerate(options, 1):
+            note = ("   (recommended)" if c == rec else "   (the longest" + ("" if measured else ", estimated") + ")"
+                    if c == fit_ctx else "" if c <= top else "   (does not fit this card)")
             say(f"  {i}) {c // 1024}K tokens{note}")
-        ctx = FASTSTRATA_CONTEXTS[int(ask("Which context?", [str(i) for i in range(1, len(FASTSTRATA_CONTEXTS) + 1)],
-                                          str(FASTSTRATA_CONTEXTS.index(rec) + 1), a.yes)) - 1]
+        ctx = options[int(ask("Which context?", [str(i) for i in range(1, len(options) + 1)],
+                              str(options.index(rec) + 1), a.yes)) - 1]
     else:
         say()
         say("  Context length = how much text the model can see at once (your chat, files, tool output).")
@@ -6751,8 +6811,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
             say(f"  A {ctx // 1024}K prompt does not fit the card with the attention cache in 16 bits, by setup's "
                 "estimate (--kv-q8, which halves it, is not built for AMD cards)")
         elif cache in ("q4", "q4k4") and fast and ctx <= fit_ctx:
-            kv, fits, cache = ("q8", 512), True, "q8"  # measured on a 4 GB card with --kv-q8 (FASTSTRATA_PRESETS)
-            ok(f"attention cache: 8 bits, as measured on a 4 GB card at {ctx // 1024}K")
+            kv, fits, cache = ("q8", 512), True, "q8"  # measured with --kv-q8 on a card this size (FASTSTRATA_PRESETS)
+            ok(f"attention cache: 8 bits, as measured on a {'6' if room >= 5.5 else '4'} GB card at {ctx // 1024}K")
         elif cache in ("q4", "q4k4"):
             say()
             say(f"  {ctx // 1024}K fits this card only with the model's memory of the text (the attention cache) in 4 "
@@ -6991,8 +7051,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
 # OpenCode where it is missing, and makes a desktop shortcut for the gateway's app.  The gateway is pinned: one commit,
 # checked by the SHA-256 of its files (GitHub may recompress an archive, the files stay), never "the latest".
 GATEWAY_REPO = "https://github.com/Jarson1408/FastStrata-Gateway"
-GATEWAY_COMMIT = "83438a330929dd4a02a4b7abdc87955225f9fc68"
-GATEWAY_FILES_SHA256 = "8ffa1ebaec183e5de41d631382cb954a10e78a3be34d397275eba60abe4c89dd"   # gateway_files_sha256()
+GATEWAY_COMMIT = "e3e44c7dcb31e3a744871186f96586e690b4e4b4"
+GATEWAY_FILES_SHA256 = "a1c3397fed9879997fc17b475500793c4ab6558f75932f169bdf3951cc518dc5"   # gateway_files_sha256()
 GATEWAY_DIR = ROOT / "gateway"
 GATEWAY_MARK = ".faststrata-gateway-commit"
 GATEWAY_PYTHON = (3, 12)                               # the gateway's pyproject.toml: requires-python >=3.12
@@ -7135,8 +7195,9 @@ def gateway_models(configs) -> list:
 
 def write_gateway_settings(models, current: str, path: Path | None = None, now: str | None = None) -> Path:
     """FastStrata's models into the gateway's settings.json, the rest of the file as it was: its `polystrata` models
-    are replaced by `models` (a remote one stays), the FastStrata folder and the model to start first are set.  The
-    file before is kept as settings.json.bak-<date>."""
+    are replaced by `models` (a remote one stays), the FastStrata folder and the model to start first are set.
+    LODESTAR starts off (the app's switch turns it on, and a choice already in the file stays).  The file before is
+    kept as settings.json.bak-<date>."""
     path = path or gateway_settings_path()
     data = {}
     if path.is_file():
@@ -7154,6 +7215,7 @@ def write_gateway_settings(models, current: str, path: Path | None = None, now: 
     data["upstream"] = ENGINE_URL
     data.setdefault("active_preset", GATEWAY_PRESET)
     data.setdefault("port", 18000)
+    data.setdefault("lodestar_enabled", False)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -7306,6 +7368,9 @@ def faststrata_gateway(a, current: Path | None = None) -> Path | None:
     say()
     say("  The FastStrata app (desktop shortcut \"FastStrata\") runs the gateway; the gateway starts the model when a")
     say(f"  client asks and stops it when the app closes. OpenCode: pick a model of the provider FastStrata ({GATEWAY_URL}).")
+    say("  The model's start takes about a minute (on the 6 GB test laptop): the first answer after the app opens, or")
+    say("  after a swap to another model, waits for it; OpenCode waits too.")
+    say("  LODESTAR, the project memory for a small model, is off; the app's switch turns it on (README: LODESTAR).")
     return gw
 
 
@@ -7986,6 +8051,11 @@ def main() -> int:
     if pf is not None and pf < 4:
         warn(page_file_advice(pf, page_file_setting()))
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
+    if not hip and fam0 in FASTSTRATA_FAMILIES:        # FASTSTRATA UX: a desktop on the card takes its share
+        gpu["model_vram_gb"], used = faststrata_vram(gpu)
+        if used:
+            warn(f"this card drives a display: the desktop and programs use {used:.1f} GB of its VRAM now, so the "
+                 f"model is judged on the {gpu['model_vram_gb']:.1f} GB left (close what you can before starting it)")
     link = None if hip else pcie_link(int(gpu.get("index", 0)))
     if link is not None:                               # the engine measures the link itself: a detail here
         line, problem = pcie_lines(link)
@@ -8079,8 +8149,9 @@ def main() -> int:
         # FASTSTRATA UX: one menu of the four presets, judged for this PC from what was measured (faststrata_fit())
         a.model_named = bool(a.model)
         presets = [k for k in FASTSTRATA_PRESETS if a.model in (None, k[1])]
-        least = min(presets, key=lambda k: poly_ram_need(FAMILIES[k[0]]["models"][k[1]], gpu["vram_gb"]))
-        rec = faststrata_pick(ram, gpu["vram_gb"]) or least   # none fits: the one that wants the least
+        fit_vram = gpu.get("model_vram_gb", gpu["vram_gb"])
+        least = min(presets, key=lambda k: poly_ram_need(FAMILIES[k[0]]["models"][k[1]], fit_vram))
+        rec = faststrata_pick(ram, fit_vram) or least   # none fits: the one that wants the least
         rec = rec if rec in presets else least
         if len(presets) > 1:
             say(f"  Which model?  Judged for this PC ({gpu['name']}, {gpu['vram_gb']:.0f} GB of VRAM, {ram:.0f} GB "
@@ -8089,7 +8160,7 @@ def main() -> int:
             for i, (f, m) in enumerate(presets, 1):
                 pr, size = FASTSTRATA_PRESETS[(f, m)], FAMILIES[f]["models"][m]
                 say(f"  {i}) {FAMILIES[f]['title']} {pr['name']} ({m}), download {size['download_gb']:.0f} GB")
-                say(f"     {faststrata_fit_text(f, m, ram, gpu['vram_gb'])}; {pr['tok_s_37k']} tok/s; {pr['quality']}"
+                say(f"     {faststrata_fit_text(f, m, ram, fit_vram)}; {pr['tok_s_37k']} tok/s; {pr['quality']}"
                     + ("   (recommended)" if (f, m) == rec else ""))
             pick = presets[int(ask("Which one?", [str(i) for i in range(1, len(presets) + 1)],
                                    str(presets.index(rec) + 1), a.yes)) - 1]

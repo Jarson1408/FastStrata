@@ -243,7 +243,7 @@ FastStrata, a prompt that fills the context, then 256 tokens written:
 | --- | --- | --- |
 | **4 GB: the minimum** | A short context. UD-Q3_K_M runs 16K to 48K, UD-Q4_K_M and APEX-I-COMPACT 32K, all with the 8-bit cache, writing at 42 to 56 tok/s. 16K is the smallest context setup offers; 32K is the least a coding agent like OpenCode works with comfortably. | Measured on a simulated 4 GB card (3,082 MiB free), [above](#on-a-4-gb-gaming-card) |
 | **6 GB: sensible** | **Q4 (UD-Q4_K_M) with the 8-bit cache at 144K**: every result on this page. | Measured: [the test PC](#the-test-pc) |
-| **8 GB: optimal** | Q4 with the 8-bit cache up to the model's whole 256K window, or 144K with the 16-bit cache, and more of the experts in VRAM. | Setup's estimate; not measured with FastStrata (PolyStrata ran these presets on an 8 GB laptop card) |
+| **8 GB: optimal** | Q4 with the 8-bit cache at about 248K (Ornith the whole 256K window), or 144K with the 16-bit cache, and more of the experts in VRAM. | Setup's estimate less 10%; not measured with FastStrata (PolyStrata ran these presets on an 8 GB laptop card) |
 
 The setting to take: **Q4 and the 8-bit cache** (`--kv-q8`). Setup recommends it on a 6 or 8 GB card and a PC with
 about 25 GB of RAM free for it; on a 4 GB card it recommends the smaller Q3.
@@ -258,13 +258,14 @@ about 25 GB of RAM free for it; on a 4 GB card it recommends the smaller Q3.
 
 What setup's menu says of each preset, by card: the longest context it offers with the cache in 16 or 8 bits, and
 the RAM it wants (in GiB as the system reports it; a "32 GB" PC reports a little under 32). The 6 GB and 4 GB rows
-were measured, the others are setup's estimate:
+were measured with the whole card free; the others, and a card whose desktop takes some of its VRAM, get setup's
+estimate less 10%, and the menu says "estimated". Reports from other PCs will replace the estimates:
 
 | Card | Qwen3.6-35B-A3B | Ornith 1.5 |
 | --- | --- | --- |
-| 4 GB | UD-Q4_K_M 32K from 26.1 GB of RAM, UD-Q3_K_M 48K from 20.6 | APEX-I-QUALITY 32K from 27.6, APEX-I-COMPACT 32K from 21.8 |
-| 6 GB | UD-Q4_K_M 144K from 24.7, UD-Q3_K_M 128K from 19.3 | APEX-I-QUALITY 144K from 25.9, APEX-I-COMPACT 144K from 19.9 |
-| 8 GB | UD-Q4_K_M 256K from 22.6, UD-Q3_K_M 256K from 17.2 | APEX-I-QUALITY 256K from 23.7, APEX-I-COMPACT 256K from 17.7 |
+| 4 GB | UD-Q4_K_M 32K from 26.1 GB of RAM, UD-Q3_K_M 48K from 20.6 | APEX-I-QUALITY 24K (estimated) from 27.6, APEX-I-COMPACT 32K from 21.8 |
+| 6 GB | UD-Q4_K_M 144K from 24.7, UD-Q3_K_M 144K from 19.3 | APEX-I-QUALITY 144K from 25.9, APEX-I-COMPACT 144K from 19.9 |
+| 8 GB | UD-Q4_K_M 248K from 22.6, UD-Q3_K_M 240K from 17.2 | APEX-I-QUALITY 256K from 23.7, APEX-I-COMPACT 256K from 17.7 |
 | 12 GB | UD-Q4_K_M from 18.3, UD-Q3_K_M from 12.9 | APEX-I-QUALITY from 19.4, APEX-I-COMPACT from 13.4 |
 | 16 GB | UD-Q4_K_M from 14.0 | APEX-I-QUALITY from 15.1 |
 
@@ -317,7 +318,8 @@ first answer came at 27 tok/s; later answers come at the speeds above.
 After the model, setup offers the [FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway), the app
 between [OpenCode](https://opencode.ai) and the model. It turns the model's tool calls into the ones OpenCode reads,
 stops a turn that loops, starts the model when OpenCode asks for it and swaps it for another installed preset, and runs
-the LODESTAR project memory (on, with a switch). Say yes, and setup:
+the [LODESTAR](#lodestar-project-memory-for-a-small-model) project memory (off at the start, with a switch). Say
+yes, and setup:
 
 - puts the gateway in `gateway\` in this folder, with its own Python environment (about 300 MB);
 - writes the installed presets into its settings, each with the context setup chose for this PC;
@@ -325,11 +327,31 @@ the LODESTAR project memory (on, with a switch). Say yes, and setup:
 - writes the presets into OpenCode's config (`~/.config/opencode/opencode.json`, the provider `faststrata`), keeping a
   `.bak` of the file and leaving the rest of it as it was; the folder is made where there is none;
 - makes a desktop shortcut **FastStrata**, which opens the gateway's app; the app starts the model when OpenCode asks,
-  and closing it frees the card and the RAM.
+  and closing it frees the card and the RAM. The model's start takes about a minute on the 6 GB test laptop: the
+  first answer after the app opens, or after a swap to another model, waits for it, and OpenCode waits too.
 
 In OpenCode, pick a model of the provider FastStrata. Later, or on an install made without it:
 `START-HERE.bat --gateway on` (`./setup.sh --gateway on`). With `--yes` setup leaves it out unless `--gateway on` is
 given; `--opencode install|skip` and `--no-shortcut` answer the rest.
+
+### LODESTAR: project memory for a small model
+
+A model with 3B active parameters reads a project's instruction files (`README.md`, `AGENTS.md`) but does not keep to
+them over a long task: it skips steps and forgets what was decided. LODESTAR is the gateway's protocol for that. It is
+off after install; the app's box **Enforce LODESTAR Memory Protocol** (or *LODESTAR Protocol* in the tray menu)
+turns it on or off at any time.
+
+- **Deploy it into a project.** The app's **Deploy Template** button (or the tray's *Deploy LODESTAR Template...*)
+  copies `AGENTS.md`, `CLAUDE.md` and the `.context/` folder into the project folder you pick. The protocol works in a
+  folder it was deployed to.
+- **Memory in the session.** With LODESTAR on, the gateway holds the model to one cycle a task: before it changes a
+  file it reads the project's rules and memory and writes the goal and its steps into
+  `.context/memory/active-context.md`; at the end it logs what was done and closes the goal. A session that was cut
+  off, or a new one, starts where the last one stopped.
+- **Semantic memory for long projects.** The lesson of each finished task is saved in `.context/semantic-memory/` and
+  searched at the start of the next one. It runs `python .context/semantic-memory/embed.py`, which needs
+  `sentence-transformers` in that Python (`pip install sentence-transformers`; it brings PyTorch). The gateway's own
+  environment does not install it.
 
 ### If setup stops
 

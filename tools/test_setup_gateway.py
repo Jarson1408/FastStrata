@@ -139,7 +139,7 @@ class TestTheGatewaysSettings(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "faststrata-gateway" / "settings.json"
             path.parent.mkdir()
-            before = {"port": 18100, "lodestar_enabled": False,
+            before = {"port": 18100, "lodestar_enabled": True,
                       "models": [{"id": "old", "engine": "polystrata", "upstream": "x"},
                                  {"id": "far", "engine": "remote", "upstream": "http://far"}]}
             path.write_text(json.dumps(before), encoding="utf-8")
@@ -148,7 +148,7 @@ class TestTheGatewaysSettings(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual([m["id"] for m in data["models"]], ["qwen3.6-35b-a3b", "far"])
             self.assertEqual(data["port"], 18100, "the user's port stays")
-            self.assertFalse(data["lodestar_enabled"], "the user's switch stays")
+            self.assertTrue(data["lodestar_enabled"], "the user's switch stays")
             self.assertEqual(data["polystrata_dir"], str(setup.ROOT))
             self.assertEqual(data["polystrata_config"], "strata-qwen36-ud-q4_k_m.json")
             self.assertEqual(data["upstream"], setup.ENGINE_URL)
@@ -162,6 +162,7 @@ class TestTheGatewaysSettings(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["active_preset"], setup.GATEWAY_PRESET)
             self.assertEqual(data["port"], 18000)
+            self.assertFalse(data["lodestar_enabled"], "LODESTAR starts off")
 
     def test_it_is_the_gateways_own_folder(self):
         with mock.patch.dict(os.environ, {"APPDATA": r"C:\Users\user\AppData\Roaming"}):
