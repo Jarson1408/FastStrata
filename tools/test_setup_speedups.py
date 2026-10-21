@@ -666,20 +666,22 @@ class Install(unittest.TestCase):
 
     def test_the_menu(self):
         # FASTSTRATA UX: one menu of the four presets, each judged for this PC; Enter takes the recommended one.  The
-        # Strata engine is neither downloaded nor built (get_prebuilt raises here)
-        code, out, cfg = self.install(HYBRID, family=None, answers={})
+        # Strata engine is neither downloaded nor built (get_prebuilt raises here).  FASTSTRATA MULTI: the menu is
+        # step 2's second way, "Choose the models myself" (tools/test_setup_multi.py has the first)
+        code, out, cfg = self.install(HYBRID, family=None, answers={"Which way": "2"})
         self.assertEqual(code, 0, out)
         menu = [ln for ln in out.splitlines() if ln[:5].strip().rstrip(")").isdigit()]
-        self.assertTrue(menu[0].strip().startswith("1) Qwen3.6-35B-A3B Q4 (UD-Q4_K_M)"), menu)
-        self.assertTrue(menu[1].strip().startswith("2) Qwen3.6-35B-A3B Q3 (UD-Q3_K_M)"), menu)
-        self.assertTrue(menu[2].strip().startswith("3) Ornith 1.5 35B-A3B Quality (APEX-I-QUALITY)"), menu)
-        self.assertTrue(menu[3].strip().startswith("4) Ornith 1.5 35B-A3B Compact (APEX-I-COMPACT)"), menu)
+        self.assertEqual([ln.strip()[:2] for ln in menu[:2]], ["1)", "2)"])            # the two ways
+        self.assertTrue(menu[2].strip().startswith("1) Qwen3.6-35B-A3B Q4 (UD-Q4_K_M)"), menu)
+        self.assertTrue(menu[3].strip().startswith("2) Qwen3.6-35B-A3B Q3 (UD-Q3_K_M)"), menu)
+        self.assertTrue(menu[4].strip().startswith("3) Ornith 1.5 35B-A3B Quality (APEX-I-QUALITY)"), menu)
+        self.assertTrue(menu[5].strip().startswith("4) Ornith 1.5 35B-A3B Compact (APEX-I-COMPACT)"), menu)
         # an 8 GB card: no measurement, so setup's estimate less 10%, said to be one
         self.assertIn("fits this PC, up to 248K context (estimated); 66.9 tok/s; the most exact   (recommended)", out)
         asked = [q.split("?")[0].strip() for q in self.asked]
-        self.assertEqual(asked[0], "Which one")
+        self.assertEqual(asked[:2], ["Which way", "Which ones"])
         self.assertNotIn("Size", asked)
-        self.assertEqual(asked[1:3], ["Do you want images", "Which context"])
+        self.assertEqual(asked[2:4], ["Do you want images", "Which context"])
         for title in ("Qwen3.8-Flash-Next", "GLM 5.3 Flash", "DeepSeek", "Gemma 4", "Tiel Coder"):
             self.assertFalse(any(title in ln for ln in menu), title)
         self.assertEqual(cfg["model_name"], "qwen3.6-35b-a3b-ud-q4_k_m")

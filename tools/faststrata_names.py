@@ -23,7 +23,8 @@ nothing. It leaves alone:
 - the pages of docs/ that describe Strata or PolyStrata as such, whose numbers were measured on those projects: only
   the pages in DOCS are this project's; and the files that describe upstream's models (the MCP server, the GGUF
   inspector, the Docker image), which FastStrata has not adapted;
-- README.md, README.pl.md and AGENTS.md, which are FastStrata's own and name PolyStrata where they mean it;
+- README.md, README.pl.md and AGENTS.md, which are FastStrata's own and name PolyStrata where they mean it, and
+  release/, the materials of a release, which stay in the working repository and name it where they mean it too;
 - the places where PolyStrata means the project this one is a fork of (KEEP). To name it in new text, link it,
   [PolyStrata](https://github.com/VecSzn/PolyStrata), or write "the PolyStrata project" or "upstream PolyStrata".
 
@@ -39,7 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SKIP = ("src/", "include/", "tests/", "cmake/", "third_party/", "bench/", "sycl/", "metal/", "patches/", "ref/",
         "data/", "test_scripts/", "SECURITY.md", "tools/vision/", "tools/hip/", "tools/qwen35/", "tools/pack_layer.py", "tools/strata_pack.py",
         "tools/mtp_pack.py", "tools/nvfp4_convert.py", "tools/polystrata_names.py", "tools/test_polystrata_names.py",
-        "tools/faststrata_names.py", "AGENTS.md", "README.md", "README.pl.md",
+        "tools/faststrata_names.py", "AGENTS.md", "README.md", "README.pl.md", "release/",
         # upstream's, and about its models (Qwen3.8-Flash-Next's families): FastStrata has not adapted them
         "Dockerfile", "docker-entrypoint.sh", "tools/strata_mcp.py", "tools/test_strata_mcp.py", "tools/strata_inspect.py")
 DOCS = ("docs/AI_SETUP.md", "docs/FASTSTRATA_OPTIONS.md", "docs/media/")

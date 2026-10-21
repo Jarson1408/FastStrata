@@ -1,5 +1,32 @@
 # Community benchmark results
 
+## FastStrata on your PC
+
+FastStrata's own numbers come from one laptop ([RESULTS.md](RESULTS.md)); the cards and CPUs below are the ones its
+users ran. Each row is the sender's own `BENCH.bat` run, as they sent it; "not stated" marks what a report leaves out.
+The test laptop's step-10 numbers are not a row here: they were measured with the engine on its own, not with
+`BENCH.bat`, so they are not the same figures.
+
+| Date | Card (VRAM) | CPU, RAM, system | FastStrata, preset, context | Chat: writing, tok/s | 4K / 16K prompt: reading, tok/s | Agent turn: first token, s | Report |
+| --- | --- | --- | --- | ---: | ---: | ---: | --- |
+| | *your PC here* | | | | | | |
+
+To add yours:
+
+1. Set up FastStrata, then close what else uses the card or the CPU: a browser or a game changes the numbers.
+2. Double-click `BENCH.bat` in the FastStrata folder (Linux: `./bench.sh`). It starts the model with your settings,
+   takes about 10 minutes and changes nothing ([what it sends](#run-the-benchmark)).
+3. Open an [issue with the form **Benchmark result**](https://github.com/Jarson1408/FastStrata/issues/new?template=benchmark.yml)
+   and drag in the `README.md` it wrote in `bench/results/<date>-community-<gpu>-<model>/`. Home folders, user and
+   host names and keys are already replaced there; read it once before you send it.
+
+A 4 GB or an 8 GB card, a PC with 32 GB of RAM, Linux and AMD cards are the reports most wanted: FastStrata was not
+measured on them ([TEST_REQUESTS.md](TEST_REQUESTS.md)).
+
+The rest of this page is upstream's, from Strata and PolyStrata: their reports, their tools and their format. The
+folders it links in `bench/results/` are not part of FastStrata's repository; they are in
+[Strata's](https://github.com/Niko1221/Strata/tree/main/bench/results).
+
 Share measurements from your own hardware so other users can judge how Strata
 might run on a similar machine. This guide suggests a report format and a pull
 request workflow; a single model, GPU, or context length is enough to contribute.

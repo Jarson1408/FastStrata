@@ -3,7 +3,7 @@
 This page is written for an AI coding assistant (Claude Code, Cursor, Codex, GitHub Copilot, ...) that a user asked to
 set up FastStrata on their PC. FastStrata runs Qwen3.6-35B-A3B or Ornith 1.5, mixture-of-experts models of 35B weights
 with 3B active, on one NVIDIA graphics card plus system RAM, and serves an OpenAI- and Anthropic-compatible API on
-`http://127.0.0.1:8080`. What it is, its presets and every measured number: the [README](../README.md).
+`http://127.0.0.1:8080`. What it is: the [README](../README.md); its presets and every measured number: [RESULTS.md](RESULTS.md).
 
 Work through the steps in order. Tell the user what you are doing in plain words; they may not be technical.
 
@@ -14,8 +14,8 @@ Work through the steps in order. Tell the user what you are doing in plain words
   user the key. Never put a tunnel or port forward in front of a server without a key.
 - Do not change the user's system beyond what setup does (setup installs Python for the user account if needed, and
   everything else inside the FastStrata folder and its `PolyStrata-data` folder). Ask before installing drivers.
-- The model download is 17 to 24 GB, 1 GB more to read pictures. Confirm the user is fine with that before you start,
-  especially on a metered connection.
+- The model download is 17 to 24 GB a preset, 1 GB more to read pictures. Confirm the user is fine with that before
+  you start, especially on a metered connection.
 - No ready-made engine of FastStrata exists yet: setup compiles it. On Windows it offers to install Visual Studio
   2022's Build Tools and the CUDA toolkit first. Setup is long-running: run it in the background or with a long
   timeout and poll its output; do not kill it because it is quiet for a while. It is resumable: running the same
@@ -81,7 +81,13 @@ Ask the user which model, if they have no preference: **Qwen3.6-35B-A3B** (`--fa
   sensible setting is UD-Q4_K_M with the 8-bit cache on a 6 GB card or larger; 8 GB is the optimum (the whole 256K by
   the estimate); 4 GB the minimum, a short context.
 - UD-Q3_K_M is not faster than UD-Q4_K_M; it needs about 5 GB less RAM. **APEX-I-COMPACT is not recommended for
-  coding**: it changes names in code that APEX-I-QUALITY gets right (README, "Models and presets").
+  coding**: it changes names in code that APEX-I-QUALITY gets right ([RESULTS.md](RESULTS.md#models-and-presets)).
+- **Several presets at once**, if the user wants to switch between them (Qwen3.6 for code, Ornith for something
+  else): `--models UD-Q4_K_M,APEX-I-QUALITY`, or `--model` given more than once. They run one at a time (the gateway
+  swaps them when OpenCode asks for another), so each needs the RAM of the table above on its own; their downloads and
+  disk space add up. Each gets its own context: `--context N` for all of them, `--context MODEL=N` for one
+  (`--context UD-Q4_K_M=147456,APEX-I-QUALITY=65536`). The first named is the one the gateway starts first. If one of
+  them fails (a download), the others are kept and setup says how to add it: `--setup --model <it>`.
 
 ## 4. Run setup without questions
 
@@ -98,8 +104,9 @@ The flags (all of them: `START-HERE.bat --help`):
 | --- | --- |
 | `--yes` | take the recommended answer to every question (no prompts) |
 | `--family qwen36\|ornith` | the model |
-| `--model UD-Q4_K_M\|UD-Q3_K_M\|APEX-I-QUALITY\|APEX-I-COMPACT` | the preset; with `--yes` it is also the consent to a preset setup's estimate finds too big |
-| `--context N` | context in tokens (default: the longest that keeps the cache in 16 or 8 bits on this card, up to 147456) |
+| `--model UD-Q4_K_M\|UD-Q3_K_M\|APEX-I-QUALITY\|APEX-I-COMPACT` | the preset (default: the one setup recommends for this PC, with its context); with `--yes` it is also the consent to a preset setup's estimate finds too big; given more than once, several presets |
+| `--models A,B` | several presets at once, e.g. `UD-Q4_K_M,APEX-I-QUALITY`; the first is started first |
+| `--context N` or `MODEL=N` | context in tokens, `144K` = 147456 (default: the longest that keeps the cache in 16 or 8 bits on this card, up to 147456); `N` for every preset, `MODEL=N` for one (`UD-Q4_K_M=147456,APEX-I-QUALITY=65536`) |
 | `--vision yes\|no\|gpu\|cpu` | read pictures; `--yes` leaves them off |
 | `--gpu N` | the card (default: the one with the most VRAM) |
 | `--speedups on\|off` | FastStrata's options (default on); `off` writes the config upstream PolyStrata's setup wrote |
@@ -138,8 +145,8 @@ Notes:
 
 ## 6. Start the server
 
-Setup prints the start script it wrote: `run-<family>-<preset>.bat` (`.sh` on Linux), lower case, e.g.
-`run-qwen36-ud-q4_k_m.bat`.
+Setup prints the start script it wrote, one a preset: `run-<family>-<preset>.bat` (`.sh` on Linux), lower case,
+e.g. `run-qwen36-ud-q4_k_m.bat`.
 
 ```
 Windows (PowerShell):  Start-Process -FilePath ".\run-qwen36-ud-q4_k_m.bat"            (opens its own window)
@@ -209,6 +216,15 @@ line when it is ready; the engine log is `strata-<family>-<preset>.log` in the F
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and the [full table](DETAILS.md#troubleshooting) (both upstream
 PolyStrata's pages). If it still fails, collect `strata-<family>-<preset>.log` and the setup output, and suggest an
 issue at https://github.com/Jarson1408/FastStrata/issues.
+
+## 10. If the user wants it removed
+
+Ask the user to close the FastStrata app (tray icon > Quit), then from the FastStrata folder:
+`cmd /c UNINSTALL.bat --yes` (Linux: `python3 setup.py --uninstall --yes`). It moves the gateway's settings
+(`%APPDATA%\faststrata-gateway`) and the desktop shortcut to the Recycle Bin and takes the provider `faststrata` out of
+OpenCode's config (a `.bak` first); with `--yes` it leaves what another FastStrata folder set up. It prints the
+FastStrata folder and the model files' folder with their size: tell the user to delete them, if they want, once you
+have finished (the model files may be shared with another FastStrata folder).
 
 `tools/strata_mcp.py`, the MCP server of upstream PolyStrata ([MCP_SERVER.md](MCP_SERVER.md)), still describes the
 PolyStrata project's model set; use the steps above for FastStrata.

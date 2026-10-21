@@ -10,7 +10,7 @@ the four presets' results are in the [README](../README.md); every run is in
 Eight changes to the `strata-poly` engine and its settings, each measured on one laptop with Qwen3.6-35B-A3B, the
 old and the new build in turns. Every run, and what was tried and left out, is in
 [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md). All of them together, as measured after step 8 (step 10 measured them
-again against the 2026-10-17 engine for all four presets: the [README](../README.md#results)):
+again against the 2026-10-17 engine for all four presets: [RESULTS.md](RESULTS.md#results)):
 
 | | Before: the engine's defaults with `--kv-q8` | Now: setup's config for this laptop |
 | --- | ---: | ---: |

@@ -64,6 +64,7 @@ import sys
 import textwrap
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -696,7 +697,7 @@ OLD_POLY_EXE = "strata-glm.exe" if WIN else "strata-glm"
 OLD_ENGINE_POLY_DIR = "engine-glm"
 POLY_CONTEXTS = [8192, 32768, 65536, 131072]
 # FASTSTRATA UX: the contexts FastStrata's presets are offered with, and what was measured of each preset on the test PC
-# (README "Results", docs/OPTIMIZATION_LOG.md step 10): writing after a 37K prompt on the 6 GB laptop, and what its
+# (docs/RESULTS.md "Results", docs/OPTIMIZATION_LOG.md step 10): writing after a 37K prompt on the 6 GB laptop, and what its
 # answers cost against the family's most exact file.  The 4 GB contexts are the ones measured on a simulated 4 GB card
 # with --kv-q8 (3,082 MiB free to the engine): setup's estimate takes a 32 GB card's buffers and calls such a card too
 # small for any context.  The 6 GB one is what step 10 ran every preset with on the 6 GB laptop (--max-context 147456,
@@ -732,6 +733,9 @@ POLY_SPEEDUPS = ("on", "off")
 # FastStrata does not support
 # them (unsupported_note()).
 FASTSTRATA_FAMILIES = ("qwen36", "ornith")
+# FastStrata's release: CHANGELOG.md has a section for it, release/make_faststrata_release.py tags the public tree
+# v<this>; on the screen and in the log, so a report says which one it is
+FASTSTRATA_VERSION = "0.1.0"
 STRATA_URL = "https://github.com/Niko1221/Strata"
 POLY_SUFFIX_MIB = 256            # --suffix-drafts: an index of 4.2M tokens in 160 MiB of RAM (step 7)
 POLY_ELASTIC_FROM = 1024         # --elastic-prefill: a prompt of this many tokens or more is read wider (step 5)
@@ -791,10 +795,20 @@ def warn(msg):
     say(f"  [!]  {msg}")
 
 
+class ModelStopped(Exception):
+    """FASTSTRATA MULTI: fail() in one of several models' steps 5 to 7 (poly_setup()): that model is left, the others
+    go on."""
+
+
+SOFT_FAIL = False                                      # FASTSTRATA MULTI: fail() raises ModelStopped, setup goes on
+
+
 def fail(msg, hint=None):
     say(f"\n  [X]  {msg}")
     if hint:
         say(f"       {hint}")
+    if SOFT_FAIL:
+        raise ModelStopped(msg)
     say("\nSetup stopped. Fix the item above and run it again - everything already done is kept and skipped.")
     report_hint()
     sys.exit(1)
@@ -843,6 +857,28 @@ def ask(question, choices, default, yes):
         if a.lower() in [c.lower() for c in choices]:
             return next(c for c in choices if c.lower() == a.lower())
         say(f"  please answer one of: {', '.join(choices)}")
+
+
+def ask_numbers(question, count, default, yes) -> list:
+    """FASTSTRATA MULTI: one number of 1 to `count` or several ("1,3" or "1 3"), each once, in the order typed; Enter
+    (and --yes) gives `default`, one number."""
+    if yes:
+        log_only(f"{question} [{default}]: {default} (--yes)")
+        return [default]
+    flush_typed_ahead()
+    while True:
+        try:
+            a = input(f"{question} [{default}]: ").strip()
+        except EOFError:
+            fail("input ended before a setup answer was received",
+                 "run setup in a terminal, or pass --yes to accept the recommended answers")
+        log_only(f"{question} [{default}]: {a}")
+        if not a:
+            return [default]
+        parts = [p for p in re.split(r"[\s,;]+", a) if p]
+        if parts and all(p.isdigit() and 1 <= int(p) <= count for p in parts):
+            return list(dict.fromkeys(int(p) for p in parts))
+        say(f"  please answer with numbers from 1 to {count}: one (2) or several (1,3)")
 
 
 def run(cmd, cwd=None, env=None, check=True, quiet=False):
@@ -946,7 +982,7 @@ def start_log(argv, folder: Path | None = None) -> Path | None:
     except OSError:
         return None
     SETUP_LOG = (path, f)
-    f.write(redact(f"FastStrata setup log, {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    f.write(redact(f"FastStrata {FASTSTRATA_VERSION} setup log, {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                    f"  command: setup.py {' '.join(argv)}\n"
                    f"  system:  {platform.platform()}, Python {platform.python_version()} ({sys.executable})\n"
                    f"  folder:  {ROOT}\n\n"))
@@ -6120,6 +6156,126 @@ def faststrata_fit_text(family, model, ram, vram_gb) -> str:
     return "too big for this card"
 
 
+def faststrata_contexts(fit_ctx) -> tuple:
+    """(the contexts offered for a preset whose longest here is `fit_ctx` (0: it does not fit), the one recommended):
+    the longest that keeps the cache in 16 or 8 bits here, up to 144K (a longer prompt reads for minutes)."""
+    options = sorted(set(FASTSTRATA_CONTEXTS) | ({fit_ctx} if fit_ctx else set()))
+    top = fit_ctx or FASTSTRATA_CONTEXTS[0]
+    return options, max(c for c in options if c <= min(top, 147456))
+
+
+# ------------------------------------------------------------------------------------------------ FASTSTRATA MULTI
+# Step 2 for FastStrata's presets: install the recommended one (its context too) without more questions, or choose one
+# or several, each with its own context.  They run one at a time (the gateway swaps them), so each is judged on its
+# own for the RAM and the card; their downloads and disk space add up.  poly_setup() asks each one's questions, then
+# builds the engine once and downloads, prepares and writes each one in turn: a model that fails there is left, the
+# ones done are kept, and the gateway gets every one installed.
+def preset_label(family, model) -> str:
+    """A preset's short name: "Qwen3.6-35B-A3B Q4", "Ornith 1.5 35B-A3B Quality"."""
+    return f"{FAMILIES[family]['title']} {FASTSTRATA_PRESETS.get((family, model), {}).get('name', model)}"
+
+
+def parse_contexts(values, known) -> tuple:
+    """--context, given once or more: N (or 144K) for every model, MODEL=N for one -> (N or None, {MODEL: N}).
+    ValueError says what is wrong; `known`: the model names there are."""
+    def tokens(v):
+        v = v.strip().upper()
+        n = int(v[:-1]) * 1024 if v.endswith("K") and v[:-1].isdigit() else int(v) if v.isdigit() else None
+        if n is None:
+            raise ValueError(f"--context {v}: a number of tokens (147456, or 144K)")
+        return n
+    every, each = None, {}
+    for value in values or []:
+        for part in (p for p in value.split(",") if p.strip()):
+            if "=" not in part:
+                every = tokens(part)
+                continue
+            model, n = (x.strip() for x in part.split("=", 1))
+            name = next((k for k in known if k.upper() == model.upper()), None)
+            if name is None:
+                raise ValueError(f"--context {part.strip()}: no model {model} (MODEL=N, e.g. UD-Q4_K_M=147456)")
+            each[name] = tokens(n)
+    return every, each
+
+
+def context_given(a, model):
+    """The context --context gives `model` (its own MODEL=N, else N for every model), or None."""
+    return (getattr(a, "context_for", None) or {}).get(model) or a.context
+
+
+def faststrata_menu(a, gpu, ram, have=()) -> list:
+    """Step 2's questions for FastStrata's presets -> the picks for poly_setup(): [{"family", "model", "context"}],
+    the context None where poly_setup() asks it.  1) the recommended preset with its recommended context, no more
+    questions (Enter, --yes); 2) the menu of the four, judged for this PC, one or several.  A --model of them skips
+    both; the recommended one installed here already skips the first."""
+    a.model_named = bool(a.model)
+    presets = [k for k in FASTSTRATA_PRESETS if a.model in (None, k[1])]
+    fit_vram = gpu.get("model_vram_gb", gpu["vram_gb"])
+    least = min(presets, key=lambda k: poly_ram_need(FAMILIES[k[0]]["models"][k[1]], fit_vram))
+    rec = faststrata_pick(ram, fit_vram) or least      # none fits: the one that wants the least
+    rec = rec if rec in presets else least
+    if len(presets) == 1:
+        return [{"family": rec[0], "model": rec[1], "context": None}]
+    installed = {}
+    for c in have:
+        ch = choices_from_config(c)
+        installed[(ch["family"], ch["model"])] = ch["context"]
+    pc = f"({gpu['name']}, {gpu['vram_gb']:.0f} GB of VRAM, {ram:.0f} GB of RAM)"
+    if rec not in installed:
+        ctx = context_given(a, rec[1]) or faststrata_contexts(faststrata_fit(*rec, ram, fit_vram)[0])[1]
+        pr, size = FASTSTRATA_PRESETS[rec], FAMILIES[rec[0]]["models"][rec[1]]
+        say(f"  Recommended for this PC {pc}:")
+        say(f"  {preset_label(*rec)} ({rec[1]}) with a {ctx // 1024}K context, download {size['download_gb']:.0f} GB")
+        say(f"     {faststrata_fit_text(*rec, ram, fit_vram)}; {pr['tok_s_37k']} tok/s; {pr['quality']}")
+        say("  1) Install the recommended one")
+        say("  2) Choose the models myself: one or several, each with its own context")
+        if ask("Which way?", ["1", "2"], "1", a.yes) == "1":
+            return [{"family": rec[0], "model": rec[1], "context": ctx}]
+        say()
+    else:
+        say(f"  The recommended one, {preset_label(*rec)} ({rec[1]}), is installed here. Choose what to install or "
+            "change.")
+    say(f"  Which models?  Judged for this PC {pc}.")
+    say("  Each on its own: one runs at a time (the gateway swaps them when OpenCode asks for another).")
+    say("  Speed: writing after a 37K prompt on the 6 GB test laptop.")
+    for i, (f, m) in enumerate(presets, 1):
+        pr, size = FASTSTRATA_PRESETS[(f, m)], FAMILIES[f]["models"][m]
+        say(f"  {i}) {preset_label(f, m)} ({m}), " + (f"installed here ({installed[(f, m)] // 1024}K)"
+                                                       if installed.get((f, m)) else
+                                                       f"download {size['download_gb']:.0f} GB"))
+        say(f"     {faststrata_fit_text(f, m, ram, fit_vram)}; {pr['tok_s_37k']} tok/s; {pr['quality']}"
+            + ("   (recommended)" if (f, m) == rec else ""))
+    say("  Several: their numbers, e.g. 1,3.")
+    picked = [presets[i - 1] for i in ask_numbers("Which ones?", len(presets), presets.index(rec) + 1, a.yes)]
+    picked.sort(key=lambda k: k != rec)                # the recommended one first: the gateway starts it first
+    return [{"family": f, "model": m, "context": None} for f, m in picked]
+
+
+def faststrata_earlier(prev: Path) -> list:
+    """The run configs of FastStrata's presets in the folder of an earlier install's config `prev`, `prev` (the one
+    used last) first: a copy set up like that install gets every one of them."""
+    found = [prev]
+    for c in sorted(model_config_files(prev.parent), key=lambda p: p.stat().st_mtime, reverse=True):
+        if c == prev or not c.is_file():
+            continue
+        try:
+            ch = choices_from_config(c)
+        except (OSError, ValueError, AttributeError):
+            continue
+        if (ch["family"], ch["model"]) in FASTSTRATA_PRESETS and ch["context"]:
+            found.append(c)
+    return found
+
+
+def earlier_gateway(folder: Path) -> Path | None:
+    """The FastStrata Gateway an earlier install in `folder` had: its own gateway/ folder, or the folder the gateway's
+    settings serve (--gateway-dir); None without one."""
+    if (folder / "gateway" / GATEWAY_MARK).is_file():
+        return folder / "gateway"
+    owner = gateway_owner(gateway_settings_path())
+    return folder if owner is not None and inside(owner, folder) and inside(folder, owner) else None
+
+
 def poly_saved_speedups(paths) -> str | None:
     """--speedups of an earlier run config of this model (the first of `paths` there is); None without one, or for a
     config from before the option: setup then takes "on"."""
@@ -6624,45 +6780,150 @@ def poly_kv_whole(cfg: dict, cfg_path: Path | None = None) -> None:
         write_config(cfg_path, cfg)
 
 
-def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted) -> int:
+def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted, picks=None) -> int:
     """Steps 2 to 7 for a model of strata-poly (docs/GLM.md, docs/BACKENDS.md): its questions, the Python
     packages, the engine (ready-made or compiled here), the model file, its tokenizer and expert profile, the run
-    config and the start script."""
+    config and the start script.  `picks` (FASTSTRATA MULTI): several of FastStrata's presets, [{"family", "model",
+    "context"}, from an earlier install also "vision" and "adopted"]: each one's questions, the packages and the
+    engine once, each one's steps 5 to 7, then the gateway once for every model installed."""
+    picks = picks or [{"family": family, "model": a.model, "context": None}]
+    shared = {"n": len(picks), "families": set()}      # FASTSTRATA MULTI: what is asked or said once for all of them
+    plans = []
+    for i, pick in enumerate(picks, 1):
+        if len(picks) > 1:
+            say()
+            say(f"  Model {i} of {len(picks)}: {preset_label(pick['family'], pick['model'])} ({pick['model']})")
+        plans.append(poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, pick.get("adopted", adopted),
+                                  shared))
+    if len(plans) > 1:
+        poly_disk_total(a, plans)
+
+    step(3, "Python packages")
+    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
+                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
+
+    step(4, "the strata-poly engine")
+    llama = get_llama_cpp()
+    ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml)")
+    if not a.build and not hip and cuda_tk != 12:
+        get_poly_prebuilt(gpu)
+    # the image encoder as the model that wants most of it has it: on the GPU, else on the CPU
+    vision = next((v for v in ("gpu", "cpu") if any(p["vision"] == v for p in plans)), "none")
+    eng = build_engine_poly_hip(gpu, llama) if hip else build_engine_poly(gpu, a.yes, llama, vision, cuda_tk)
+    lib_dirs = engine_lib_dirs(eng)
+    ok(f"engine: {eng / POLY_EXE}")
+
+    # FASTSTRATA MULTI: one model's stop (a download, a check) leaves it; the ones done are kept, the rest go on
+    global SOFT_FAIL
+    done, stopped = [], []
+    for i, p in enumerate(plans, 1):
+        SOFT_FAIL = len(plans) > 1
+        try:
+            poly_install(a, p, gpu, hip, multi, ram, data, elsewhere, port, cuda_tk, llama, eng, lib_dirs,
+                         (i, len(plans)))
+            done.append(p)
+        except ModelStopped:
+            stopped.append(p)
+        finally:
+            SOFT_FAIL = False
+    if not done:                                       # every one stopped: as fail() ends
+        say("\nSetup stopped. Fix the items above and run it again - everything already done is kept and skipped.")
+        report_hint()
+        return 1
+
+    start_here = "START-HERE.bat" if WIN else "./setup.sh"
+    cfg_path = done[0]["cfg_path"]                     # the recommended one, or the first chosen: started first
+    say()
+    say("All set.")
+    say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1   (any API key; model name: anything)")
+    say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
+    if any(p["vision"] != "none" for p in done):
+        say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
+    if a.host and a.host not in ("127.0.0.1", "localhost"):
+        say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{port}/)"
+            + ("" if a.api_key else " - no API key set: anyone on your network can use it"))
+    if len(plans) == 1:
+        say(f"  Next time:        just run {start_here} (or {done[0]['script'].name}) - it starts right away")
+    else:
+        say("  Models:           " + ", ".join(f"{p['title']} {p['model']} ({p['ctx'] // 1024}K)" for p in done))
+        say(f"  Next time:        just run {start_here} (it asks which one to start), or one's own script: "
+            + ", ".join(p["script"].name for p in done))
+    gw = (faststrata_gateway(a, current=cfg_path) if any(p["family"] in FASTSTRATA_FAMILIES for p in done)
+          and getattr(a, "gateway", "off") != "off" else None)
+    if stopped:
+        say()
+        for p in stopped:
+            warn(f"{p['title']} {p['model']} was not installed (the reason is above). What is done is kept: "
+                 f"{start_here} --setup --model {p['model']} adds it, its download goes on where it stopped")
+        report_hint()
+        return 1
+    if a.no_start:
+        return 0
+    if gw is not None and ask("Start FastStrata now, in the Gateway app (it starts the model when OpenCode asks)?",
+                              ["y", "n"], "y", a.yes) == "y":
+        return start_gateway_app(gw)
+    return start(cfg_path, port)
+
+
+def poly_disk_total(a, plans) -> None:
+    """FASTSTRATA MULTI: the downloads of several models added up, and the disk space they take together, before any
+    is downloaded; stops where the drive has too little."""
+    get = [p for p in plans if p["download"] >= 0.05]
+    total = sum(p["download"] for p in plans) + 2
+    base = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir)
+    free = free_gb(base)
+    say()
+    say("  Downloads: " + (" + ".join(f"{preset_label(p['family'], p['model'])} {p['download']:.0f} GB" for p in get)
+                           + (f" = {sum(p['download'] for p in get):.0f} GB" if len(get) > 1 else "")
+                           if get else "none, every file is here already"))
+    say(f"  Disk: ~{total:.0f} GB needed in {base}, {free:.0f} GB free")
+    if free < total:
+        fail(f"not enough free disk space in {base}: need ~{total:.0f} GB for the {len(plans)} models",
+             "choose fewer models, or use --models-dir on a bigger drive")
+
+
+def poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, adopted, shared) -> dict:
+    """Step 2 for one model of strata-poly (poly_setup()): its family's checks, its size, images, context, attention
+    cache and conversation cache, and what of it is on disk -> the plan poly_install() carries out.  `shared`: what
+    is asked or said once when several models are set up together (FASTSTRATA MULTI)."""
+    family, model_arg = pick["family"], pick["model"]
     fam = FAMILIES[family]
     title = fam["title"]
-    if hip and WIN:
-        fail(f"{title} has no AMD engine for Windows: its HIP engine is compiled on Linux",
-             "choose another model for this card, or run setup on Linux")
-    if hip and family in ("glm", "deepseek", "gemma4", "tiel"):   # the engine runs on the AMD card, these models not yet
-        warn(f"{title} on the AMD card has not been tried: the engine runs there, this model was not")
-    if cuda_tk == 12:
-        warn(f"{title}'s engine with CUDA 12 is compiled here (the ready-made one is CUDA 13)" +
-             (": on Pascal / Volta it is untested" if int(gpu["arch"]) < CUDA13_MIN_ARCH else ""))
-    if WIN and not fam.get("windows"):
-        confirm_risk(f"{title} has been run on Linux only: its engine compiles on Windows, the model was not tried "
-                     "there", bool(a.family), a.yes, f"{title} has not been tried on Windows",
-                     f"use Linux, or --family {family} --yes to try it here")
-    sees = fam.get("vision") is True
-    if sees and hip:   # the image encoder is a CUDA program: no HIP build of it yet (as for the main engine)
-        say("  Images: the image encoder is a CUDA program: on the AMD card images are off (text answers).")
-        sees = False
-    unused = [flag for flag, given in (
-        ("--vision", not sees and a.vision not in (None, "no", "none")),
-        ("--vision-tokens", not sees and a.vision_tokens is not None),
-        ("--kv", a.kv), ("--kv-streaming", a.kv_streaming != "auto"), ("--rope-scaling", a.rope_scaling),
-        ("--rope-scale", a.rope_scale is not None), ("--low-ram", a.low_ram != "auto"),
-        ("--resident-budget-gib", a.resident_budget_gib is not None), ("--parallel", a.parallel is not None),
-        ("--draft-vocab", a.draft_vocab), ("--layer-split", a.layer_split and not multi), ("--calibrate", a.calibrate),
-        ("--speedups", a.speedups is not None and not fam.get("speedups")),
-        ("--experimental-speed-projection",
-         (a.experimental_speed_projection or "off").strip().lower() not in ("off", "no", "n", "0"))) if given]
-    if unused:
-        warn(f"not used with {title} (its engine has no such setting): " + ", ".join(unused))
+    several = shared["n"] > 1
+    sees = fam.get("vision") is True and not hip
+    if family not in shared["families"]:               # a family's own checks, once
+        shared["families"].add(family)
+        if hip and WIN:
+            fail(f"{title} has no AMD engine for Windows: its HIP engine is compiled on Linux",
+                 "choose another model for this card, or run setup on Linux")
+        if hip and family in ("glm", "deepseek", "gemma4", "tiel"):   # the engine runs on the AMD card, these models not yet
+            warn(f"{title} on the AMD card has not been tried: the engine runs there, this model was not")
+        if cuda_tk == 12:
+            warn(f"{title}'s engine with CUDA 12 is compiled here (the ready-made one is CUDA 13)" +
+                 (": on Pascal / Volta it is untested" if int(gpu["arch"]) < CUDA13_MIN_ARCH else ""))
+        if WIN and not fam.get("windows"):
+            confirm_risk(f"{title} has been run on Linux only: its engine compiles on Windows, the model was not tried "
+                         "there", bool(a.family), a.yes, f"{title} has not been tried on Windows",
+                         f"use Linux, or --family {family} --yes to try it here")
+        if fam.get("vision") is True and hip:   # the image encoder is a CUDA program: no HIP build of it yet
+            say("  Images: the image encoder is a CUDA program: on the AMD card images are off (text answers).")
+        unused = [flag for flag, given in (
+            ("--vision", not sees and a.vision not in (None, "no", "none")),
+            ("--vision-tokens", not sees and a.vision_tokens is not None),
+            ("--kv", a.kv), ("--kv-streaming", a.kv_streaming != "auto"), ("--rope-scaling", a.rope_scaling),
+            ("--rope-scale", a.rope_scale is not None), ("--low-ram", a.low_ram != "auto"),
+            ("--resident-budget-gib", a.resident_budget_gib is not None), ("--parallel", a.parallel is not None),
+            ("--draft-vocab", a.draft_vocab), ("--layer-split", a.layer_split and not multi),
+            ("--calibrate", a.calibrate), ("--speedups", a.speedups is not None and not fam.get("speedups")),
+            ("--experimental-speed-projection",
+             (a.experimental_speed_projection or "off").strip().lower() not in ("off", "no", "n", "0"))) if given]
+        if unused:
+            warn(f"not used with {title} (its engine has no such setting): " + ", ".join(unused))
 
     sizes = family_models(family)
     names = list(sizes)
-    if a.model and a.model not in names:
-        fail(f"{title} has no {a.model} model file", "choose one of: " + ", ".join(names))
+    if model_arg and model_arg not in names:
+        fail(f"{title} has no {model_arg} model file", "choose one of: " + ", ".join(names))
     vram = gpu.get("model_vram_gb", gpu["vram_gb"])   # FASTSTRATA UX: less the desktop's, where the card drives one
     if multi:   # each card has its layers' dense weights; its own scratch and staging buffer cost ~2 GB a card more
         vram = sum(gpu_info(i)["vram_gb"] for i in multi) - 2.0 * (len(multi) - 1)
@@ -6670,18 +6931,18 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     # and the one whose RAM it has, or that wants the least, goes on to the checks below, which stop or ask
     fast = bool(fam.get("speedups")) and family in FASTSTRATA_FAMILIES and not hip
     if fast:                                           # FASTSTRATA UX: the measured fit, not the 32 GB card's estimate
-        pick = faststrata_pick(ram, vram, [family])
-        model = a.model or (pick[1] if pick else poly_default(sizes, ram, vram))
+        pick_fit = faststrata_pick(ram, vram, [family])
+        model = model_arg or (pick_fit[1] if pick_fit else poly_default(sizes, ram, vram))
     else:
-        model = a.model or (fam.get("speedups") and poly_pick(sizes, ram, vram, hip)) or poly_default(sizes, ram, vram)
-    if fast and not a.model and faststrata_pick(ram, vram, [family]) is None:
+        model = model_arg or (fam.get("speedups") and poly_pick(sizes, ram, vram, hip)) or poly_default(sizes, ram, vram)
+    if fast and not model_arg and faststrata_pick(ram, vram, [family]) is None:
         warn(f"none of {title}'s presets fits this PC ({ram:.0f} GB of RAM, {vram:.1f} GB of VRAM): " + "; ".join(
             f"{m} {faststrata_fit_text(family, m, ram, vram)}" for m in names))
-    elif not fast and not a.model and fam.get("speedups") and poly_pick(sizes, ram, vram, hip) is None:
+    elif not fast and not model_arg and fam.get("speedups") and poly_pick(sizes, ram, vram, hip) is None:
         warn(f"this PC is too small for {title}'s presets by setup's estimates: " + "; ".join(
             f"{m} wants ~{poly_ram_need(x, vram):.0f} GB of RAM and {poly_beside_gb(x) + 2:.1f} GB of VRAM"
             for m, x in sizes.items()) + f" (this PC: {ram:.0f} GB of RAM, {vram:.1f} GB of VRAM)")
-    if fast and not a.model and len(names) > 1:
+    if fast and not model_arg and len(names) > 1:
         say()
         say(f"  Which {title} file?  (speed: writing after a 37K prompt on the 6 GB test laptop)")
         for i, m in enumerate(names, 1):
@@ -6691,7 +6952,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
                 + ("   (recommended)" if m == model else ""))
         model = names[int(ask("Which one?", [str(i) for i in range(1, len(names) + 1)], str(names.index(model) + 1),
                               a.yes)) - 1]
-    elif not a.model and len(names) > 1:
+    elif not model_arg and len(names) > 1:
         say()
         say("  Which size?  The RAM is setup's estimate for this card: the experts it does not hold stay in RAM.")
         for i, m in enumerate(names, 1):
@@ -6704,8 +6965,11 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     vision = "none"
     if sees:
         auto = "gpu" if vram >= POLY_VISION_GPU_GB else "cpu"
-        if a.vision:
-            vision = {"yes": auto, "no": "none"}.get(a.vision, a.vision)
+        want = pick.get("vision") or a.vision
+        if want:
+            vision = {"yes": auto, "no": "none"}.get(want, want)
+        elif "images" in shared:                       # FASTSTRATA MULTI: the answer given for the first model
+            vision = auto if shared["images"] == "y" else "none"
         else:
             say()
             say(f"  Images: the model can also read pictures (screenshots, photos, scanned pages). This adds a "
@@ -6715,7 +6979,10 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
                  if auto == "gpu" else
                  f"runs on the CPU on this card (a few seconds a picture; --vision gpu: ~{fam['vision_vram_gb']} "
                  "GB of VRAM)."))
-            vision = auto if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
+            if several:
+                say("  One answer for every model chosen (a download for each).")
+            shared["images"] = ask("Do you want images?", ["y", "n"], "n", a.yes)
+            vision = auto if shared["images"] == "y" else "none"
         ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
     room = max(0.0, vram - (fam["vision_vram_gb"] if vision == "gpu" else 0))   # the VRAM left for the model
     beside = poly_beside_gb(d)
@@ -6728,7 +6995,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     fit_ctx, fit_cache = faststrata_fit(family, model, ram, room) if fast else (0, "")
     if fast and not fit_ctx:
         confirm_risk(f"{title} {model} is {faststrata_fit_text(family, model, ram, room)}: it may not start, or answer "
-                     "very slowly", getattr(a, "model_named", bool(a.model)), a.yes,
+                     "very slowly", getattr(a, "model_named", bool(model_arg)), a.yes,
                      f"{title} {model} does not fit this PC",
                      f"--family {family} --model {model} --yes installs it anyway")
         warn(f"going on with {model}, as you chose")
@@ -6738,7 +7005,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         enc = vision == "gpu"                          # the encoder's share may be what does not fit
         confirm_risk(f"{title} takes about {beside} GB of VRAM before any expert (measured on a 32 GB "
                      f"card at a 32K context)" + (f" and its image encoder {fam['vision_vram_gb']} GB" if enc else "") +
-                     f"; {gpu_name(gpu)} has less than it takes to start", bool(a.model), a.yes,
+                     f"; {gpu_name(gpu)} has less than it takes to start", bool(model_arg), a.yes,
                      f"{title} needs more VRAM than {vram:.0f} GB",
                      ("--vision cpu keeps the image encoder off the card; " if enc else "") +
                      f"--family {family} --model {model} --yes installs it anyway")
@@ -6753,35 +7020,39 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         confirm_risk(f"RAM: {ram:.0f} GB. {title} wants about {need_ram:.0f} GB on this card by setup's estimate: the "
                      f"{d['arena_gb'] - held:.0f} GB of experts the GPU does not hold are read through the OS file "
                      "cache. With less RAM they come from the SSD while it answers: expect it to be much slower (not "
-                     "measured)", bool(a.model), a.yes,
+                     "measured)", bool(model_arg), a.yes,
                      f"{title} wants about {need_ram:.0f} GB of RAM; this PC has {ram:.0f}",
                      f"--family {family} --model {model} --yes installs it anyway")
         warn(f"going on with {ram:.0f} GB of RAM, as you chose")
     ok(f"size: {model}" + preset_note(d))
     tag = fam["tag"] + model                           # names of the config, the start script and the data folders
 
-    if a.context:
-        ctx = a.context
+    given = pick.get("context") or context_given(a, model)
+    if given:
+        ctx = given
         if not 16 <= ctx <= 1048576:
             fail(f"--context {ctx}: {title} takes 16 to 1048576 tokens")
     elif fast:
         # the largest context that keeps the cache in 16 or 8 bits here, up to 144K (a longer prompt reads for minutes)
-        options = sorted(set(FASTSTRATA_CONTEXTS) | ({fit_ctx} if fit_ctx else set()))
+        options, rec = faststrata_contexts(fit_ctx)
         top = fit_ctx or FASTSTRATA_CONTEXTS[0]
-        rec = max(c for c in options if c <= min(top, 147456))
         measured = faststrata_fit_info(family, model, ram, room)[2]
         say()
-        say("  Context = how much the model sees at once (the chat, files, tool output). OpenCode works best with a long")
-        say("  one; a longer one costs VRAM, and a long prompt takes a while to read the first time.")
+        if not shared.get("context_said"):             # FASTSTRATA MULTI: once for every model
+            shared["context_said"] = True
+            say("  Context = how much the model sees at once (the chat, files, tool output). OpenCode works best with "
+                "a long")
+            say("  one; a longer one costs VRAM, and a long prompt takes a while to read the first time.")
         if fit_ctx:
-            say(f"  This card: up to {fit_ctx // 1024}K, " + (f"measured on {measured}." if measured else
+            on = f"{preset_label(family, model)} on this card" if several else "This card"
+            say(f"  {on}: up to {fit_ctx // 1024}K, " + (f"measured on {measured}." if measured else
                 "estimated (setup's estimate less 10%; reports from other PCs will correct it)."))
         for i, c in enumerate(options, 1):
             note = ("   (recommended)" if c == rec else "   (the longest" + ("" if measured else ", estimated") + ")"
                     if c == fit_ctx else "" if c <= top else "   (does not fit this card)")
             say(f"  {i}) {c // 1024}K tokens{note}")
-        ctx = options[int(ask("Which context?", [str(i) for i in range(1, len(options) + 1)],
-                              str(options.index(rec) + 1), a.yes)) - 1]
+        ctx = options[int(ask(f"Which context for {preset_label(family, model)}?" if several else "Which context?",
+                              [str(i) for i in range(1, len(options) + 1)], str(options.index(rec) + 1), a.yes)) - 1]
     else:
         say()
         say("  Context length = how much text the model can see at once (your chat, files, tool output).")
@@ -6798,7 +7069,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
                                    str(POLY_CONTEXTS.index(32768) + 1), a.yes)) - 1]
     ok(f"context: {ctx} tokens")
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
-    before = [cfg_path, adopted if adopted is not None and adopted.name == cfg_path.name else None]
+    earlier = adopted if adopted is not None and adopted.name == cfg_path.name else None
+    before = [cfg_path, earlier]
 
     # FastStrata's speedups (poly_speedups()), as the model's run config has them unless --speedups is given.  The
     # attention cache in 8 bits is asked here, with the context it is for.
@@ -6852,12 +7124,18 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     conv = poly_saved_conv(before)
     if conv is None:
         size = poly_conv_mib(family, mode, ram, need_ram)
-        say()
-        say(f"  A coding agent switches between conversations (its subagents, side requests): keeping them in up to "
-            f"{size // 1024} GB")
-        say("  of RAM means one it comes back to is not read again.")
-        spare = ram >= need_ram + size / 1024
-        conv = size if ask("Keep conversations in RAM?", ["y", "n"], "y" if spare else "n", a.yes) == "y" else 0
+        if "conv" in shared:                           # FASTSTRATA MULTI: the answer given for the first model
+            conv = size if shared["conv"] == "y" else 0
+        else:
+            say()
+            say(f"  A coding agent switches between conversations (its subagents, side requests): keeping them in up "
+                f"to {size // 1024} GB")
+            say("  of RAM means one it comes back to is not read again.")
+            if several:
+                say("  One answer for every model chosen (only the model that runs uses it).")
+            spare = ram >= need_ram + size / 1024
+            shared["conv"] = ask("Keep conversations in RAM?", ["y", "n"], "y" if spare else "n", a.yes)
+            conv = size if shared["conv"] == "y" else 0
     ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
 
     # one file, or the numbered files of a split GGUF: the engine is given the first and finds the others by name
@@ -6877,7 +7155,6 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     for s in shards:                                   # #173: a whole file copied in by hand
         if s.exists() and not done(s) and whole_shard(s):
             mark(s, "whole (checked against its own tensor directory)")
-    gguf = shards[0]
     have_model = all(s.exists() and (done(s) or bool(a.gguf_dir)) for s in shards)
     # the size's draft model: beside the model's file, or, when --gguf-dir has none, where setup keeps its own
     guesser = models_dir / Path(d["draft_model"]).name if d.get("draft_model") else None
@@ -6890,28 +7167,33 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         mmproj = Path(a.models_dir) / tag / mmproj.name
     have_mmproj = mmproj is None or mmproj.exists() and (done(mmproj) or bool(a.gguf_dir) or whole_shard(mmproj))
     on_disk = sum(f.stat().st_size for s in shards for f in (s, s.with_name(s.name + ".part")) if f.is_file()) / 1e9
-    need = (0 if have_model and have_guesser else max(d["download_gb"] - on_disk, 0)) + \
-        (0 if have_mmproj else fam["vision_gb"]) + 2
-    if free_gb(models_dir) < need:
+    download = (0 if have_model and have_guesser else max(d["download_gb"] - on_disk, 0)) + \
+        (0 if have_mmproj else fam["vision_gb"])
+    need = download + 2
+    if not several and free_gb(models_dir) < need:     # several: poly_disk_total(), for all of them
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB" +
              (f" ({on_disk:.0f} GB of the model is already there)" if on_disk >= 1 and not have_model else ""),
              "use --models-dir on a bigger drive")
+    return {"family": family, "fam": fam, "title": title, "model": model, "d": d, "vision": vision, "ctx": ctx,
+            "kv": kv, "mode": mode, "kind": kind, "conv": conv, "need_ram": need_ram, "tag": tag,
+            "cfg_path": cfg_path, "earlier": earlier, "models_dir": models_dir, "shards": shards,
+            "have_model": have_model, "guesser": guesser, "have_guesser": have_guesser, "mmproj": mmproj,
+            "have_mmproj": have_mmproj, "download": download}
 
-    step(3, "Python packages")
-    pip_install(requirement_lines() if REQUIREMENTS.exists() else PY_PACKAGES,
-                "numpy, jinja2, regex, pyyaml, tqdm, requests, cmake, ninja, pillow, psutil")
 
-    step(4, "the strata-poly engine")
-    llama = get_llama_cpp()
-    ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml)")
-    if not a.build and not hip and cuda_tk != 12:
-        get_poly_prebuilt(gpu)
-    eng = build_engine_poly_hip(gpu, llama) if hip else build_engine_poly(gpu, a.yes, llama, vision, cuda_tk)
-    lib_dirs = engine_lib_dirs(eng)
-    ok(f"engine: {eng / POLY_EXE}")
+def poly_install(a, p, gpu, hip, multi, ram, data, elsewhere, port, cuda_tk, llama, eng, lib_dirs, nth) -> None:
+    """Steps 5 to 7 for one model of strata-poly, as poly_choices() planned it: its files, its tokenizer and expert
+    profile, its run config and start script (p["script"]).  `nth`: (this one, of how many)."""
+    fam, title, model, d, tag = p["fam"], p["title"], p["model"], p["d"], p["tag"]
+    family, vision, ctx, kv, mode, kind, conv = p["family"], p["vision"], p["ctx"], p["kv"], p["mode"], p["kind"], \
+        p["conv"]
+    models_dir, shards, guesser, mmproj = p["models_dir"], p["shards"], p["guesser"], p["mmproj"]
+    gguf = shards[0]
+    which = f"{title} {model}"
+    several = nth[1] > 1
 
-    step(5, f"downloading {title} {model}")
-    if not have_model:
+    step(5, f"downloading {which}" + (f" ({nth[0]} of {nth[1]})" if several else ""))
+    if not p["have_model"]:
         say(f"  The model file goes in {models_dir}")
         say(f"  A file you already have: put it there with its original name ({', '.join(s.name for s in shards)}), "
             "or use --gguf-dir <its folder>.")
@@ -6926,18 +7208,18 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     for s in shards:
         verify_sha256(s, *fam["sha256"][s.name])
     if guesser is not None:
-        if not have_guesser:
+        if not p["have_guesser"]:
             say("  Its draft model lets it guess a few words ahead and check them at once (faster answers).")
             download(d.get("hf", fam["hf"]) + d["draft_model"], guesser)
         verify_sha256(guesser, *fam["sha256"][guesser.name])
     if mmproj is not None:
-        if not have_mmproj:
+        if not p["have_mmproj"]:
             download(fam["mmproj_hf"] + fam["mmproj"], mmproj, "vision encoder")
         verify_sha256(mmproj, *fam["sha256"][mmproj.name])
         ok(f"vision encoder: {mmproj}")
     ok("model file present")
 
-    step(6, "preparing the model for FastStrata")
+    step(6, f"preparing {which} for FastStrata" if several else "preparing the model for FastStrata")
     pack = find_in([data, *elsewhere], f"packs/{tag.lower()}") or data / "packs" / tag.lower()
     if not (pack / "tokenizer" / "vocab.json").exists():
         run([sys.executable, str(ROOT / "tools" / "strata_tokenizer.py"), "--gguf", str(gguf), "--out", str(pack)],
@@ -6964,7 +7246,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         ok(f"draft model: {draft}")
     ok(f"model prepared: {pack}")
 
-    step(7, "writing the start script")
+    step(7, f"writing {which}'s start script" if several else "writing the start script")
     args = ["--model", str(gguf), "--max-context", str(ctx), "--expert-profile", str(profile)]
     if draft:
         args += ["--draft-model", str(draft)]
@@ -6985,11 +7267,12 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         ok(f"hybrid CPU ({cores[0]} performance + {cores[1]} efficiency cores): {threads} CPU threads for the experts "
            "outside VRAM (--threads in the config)")
     # FastStrata's speedups this PC, card and preset take, where the engine built here has them
-    items, notes = poly_speedups(family, mode, d, gpu, hip, multi, ram, need_ram, cpu_info()[1], cpu_threads(), cores,
-                                 kv, conv)
-    poly_add_speedups(args, items, notes, eng / POLY_EXE, f"{title} {model}", bool(d.get("measured")))
+    items, notes = poly_speedups(family, mode, d, gpu, hip, multi, ram, p["need_ram"], cpu_info()[1], cpu_threads(),
+                                 cores, kv, conv)
+    poly_add_speedups(args, items, notes, eng / POLY_EXE, which, bool(d.get("measured")))
+    cfg_path = p["cfg_path"]
     cfg = {"exe": str(eng / POLY_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
-           "model_name": f"{fam['name']}-{model.lower()}", "display_name": f"{title} {model}",
+           "model_name": f"{fam['name']}-{model.lower()}", "display_name": which,
            "log": str(ROOT / f"strata-{tag.lower()}.log"), "lib_dirs": lib_dirs, "port": port}
     if kind:                                           # a setup run again keeps it (poly_saved_speedups())
         cfg["speedups"] = mode
@@ -7008,7 +7291,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         cfg["api_key"] = a.api_key
     if a.browser is not None:
         cfg["open_browser"] = a.browser
-    earlier = adopted if adopted is not None and adopted.name == cfg_path.name else None
+    earlier = p["earlier"]
     if vision != "none":
         # the most rows a picture becomes: one of this engine's prompt batches (1,024) holds a picture of Gemma 4's
         vt = vision_tokens(a.vision_tokens, vision, cfg_path if cfg_path.is_file() else earlier)
@@ -7021,27 +7304,8 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
     poly_kv_whole(cfg)
     write_setup_config(cfg_path, cfg, earlier)
-    script = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
-    ok(f"start script: {script.name}")
-
-    say()
-    say("All set.")
-    say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1   (any API key; model name: anything)")
-    say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
-    if vision != "none":
-        say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
-    if a.host and a.host not in ("127.0.0.1", "localhost"):
-        say(f"  Other devices:    the server window prints this PC's address (http://<IP>:{port}/)"
-            + ("" if a.api_key else " - no API key set: anyone on your network can use it"))
-    say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
-    gw = (faststrata_gateway(a, current=cfg_path) if family in FASTSTRATA_FAMILIES
-          and getattr(a, "gateway", "off") != "off" else None)
-    if a.no_start:
-        return 0
-    if gw is not None and ask("Start FastStrata now, in the Gateway app (it starts the model when OpenCode asks)?",
-                              ["y", "n"], "y", a.yes) == "y":
-        return start_gateway_app(gw)
-    return start(cfg_path, port)
+    p["script"] = write_run_script(tag, cfg_path, port, cfg.get("open_browser") is not False)
+    ok(f"start script: {p['script'].name}")
 
 
 # ------------------------------------------------------------------------------------------------ FASTSTRATA GATEWAY
@@ -7326,15 +7590,23 @@ def faststrata_gateway(a, current: Path | None = None) -> Path | None:
         warn("the gateway serves FastStrata's models, and none is installed here yet")
         return None
     later = f"{'START-HERE.bat' if WIN else './setup.sh'} --gateway on"
-    if a.gateway != "on" and a.yes:                    # --yes (an AI's or a script's setup): only when named
+    # the user's own --yes: a copy set up like an earlier install answers its models' questions alone (a.yes), and
+    # still asks about the gateway and OpenCode (FASTSTRATA MULTI)
+    yes = getattr(a, "yes_given", a.yes)
+    if a.gateway != "on" and yes:                      # --yes (an AI's or a script's setup): only when named
         say(f"  FastStrata Gateway for OpenCode: not set up (--yes); with it: {later}")
         return None
     step("G", "FastStrata Gateway and OpenCode")
     there = a.gateway_dir is None and (GATEWAY_DIR / GATEWAY_MARK).is_file()
+    earlier = None if there or a.gateway_dir else getattr(a, "gateway_before", None)
     if there:                                          # installed before: kept up to date, its models refreshed
         say("  The FastStrata Gateway is installed here: its models and OpenCode's are brought up to date.")
-    if a.gateway != "on" and not there and ask("  Install the FastStrata Gateway (the app between OpenCode and the model: tool calls, "
-                                 "model swaps, project memory)?", ["y", "n"], "y", a.yes) != "y":
+    elif earlier is not None:                          # the earlier install's: this copy takes it over, as it was
+        say(f"  Your earlier install ({earlier}) has the FastStrata Gateway: this copy gets it too, and the gateway's")
+        say("  settings, OpenCode's models and the desktop shortcut now point here.")
+    if a.gateway != "on" and not there and earlier is None and ask(
+            "  Install the FastStrata Gateway (the app between OpenCode and the model: tool calls, model swaps, project "
+            "memory)?", ["y", "n"], "y", yes) != "y":
         say(f"  skipped; later: {later}")
         return None
     gw = Path(a.gateway_dir).resolve() if a.gateway_dir else fetch_gateway()
@@ -7345,6 +7617,7 @@ def faststrata_gateway(a, current: Path | None = None) -> Path | None:
     if py is None:
         return None
     current = current if current is not None and current in configs else configs[0]
+    configs = [current] + [c for c in configs if c != current]   # the one started first, first in OpenCode's list too
     models = gateway_models(configs)
     settings = write_gateway_settings(models, current.name)
     ok(f"the gateway serves {', '.join(m['id'] for m in models)} (settings: {settings})")
@@ -7352,14 +7625,14 @@ def faststrata_gateway(a, current: Path | None = None) -> Path | None:
     exe = find_opencode()
     if exe:
         ok(f"OpenCode found: {exe} {out([exe, '--version']).strip()[:40]}")
-    elif a.opencode == "install" or (a.opencode == "ask" and not a.yes and ask(
+    elif a.opencode == "install" or (a.opencode == "ask" and not yes and ask(
             "  OpenCode (the coding agent the gateway serves) is not installed. Install it now?",
-            ["y", "n"], "y", a.yes) == "y"):
+            ["y", "n"], "y", yes) == "y"):
         exe = install_opencode()
     else:
         say("  OpenCode: not installed (https://opencode.ai); its config is written now, so it finds the models "
             "once it is")
-    connect_opencode(py, gw, a.yes)
+    connect_opencode(py, gw, yes)
 
     if not a.no_shortcut:
         link = make_shortcut(gw)
@@ -7381,6 +7654,270 @@ def start_gateway_app(gw: Path) -> int:
     subprocess.Popen([str(pyw), "-m", "gateway.gui"], cwd=gw, creationflags=flags, close_fds=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     ok("the FastStrata app is starting (its icon is in the taskbar's tray)")
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------ FASTSTRATA UNINSTALL
+# --uninstall (UNINSTALL.bat, ./setup.sh --uninstall): what the gateway step put outside this folder, undone in one
+# place.  The gateway's settings folder and the desktop shortcut go to the Recycle Bin (the trash on Linux), so a
+# mistake is put back from there; OpenCode's config loses the provider `faststrata` alone, a .bak of the file kept
+# first by the gateway's own rule (a .bak there already stays, the new one is .bak-<date>-<time>).  What belongs to
+# another FastStrata folder is asked about and left by default.  This folder and the model files are the user's to
+# delete: setup says where they are and how big.  Nothing is touched while the FastStrata app runs.
+OPENCODE_PROVIDER = "faststrata"                       # the gateway's provider in OpenCode's config (opencode_export)
+# the gateway's strip_comments(): a string first, so a URL's // in a value is no comment
+JSONC_COMMENT = re.compile(r'"(?:\\.|[^"\\])*"|/\*.*?\*/|//[^\n]*', re.DOTALL)
+
+
+def to_home_trash(path: Path, now: str | None = None) -> Path:
+    """`path` into the freedesktop.org trash of the user's home (XDG_DATA_HOME/Trash, where `gio trash` and the file
+    managers put it): the item under files/, a .trashinfo under info/ with its old place and the time, so a file
+    manager can put it back.  The item's place in the trash."""
+    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "Trash"
+    (base / "files").mkdir(parents=True, exist_ok=True)
+    (base / "info").mkdir(parents=True, exist_ok=True)
+    name, n = path.name, 1
+    while (base / "files" / name).exists() or (base / "info" / f"{name}.trashinfo").exists():
+        n += 1
+        name = f"{path.stem}.{n}{path.suffix}"
+    (base / "info" / f"{name}.trashinfo").write_text(
+        f"[Trash Info]\nPath={urllib.parse.quote(str(path.absolute()))}\n"
+        f"DeletionDate={now or time.strftime('%Y-%m-%dT%H:%M:%S')}\n", encoding="utf-8")
+    shutil.move(str(path), str(base / "files" / name))
+    return base / "files" / name
+
+
+def to_recycle_bin(path: Path) -> None:
+    """`path` into Windows' Recycle Bin (SHFileOperationW with FOF_ALLOWUNDO), with no question; Windows asks only
+    where it would delete for good (a drive without a Recycle Bin: FOF_WANTNUKEWARNING)."""
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        if ctypes.sizeof(ctypes.c_void_p) == 4:        # shellapi.h packs it to 1 byte on 32-bit Windows only
+            _pack_ = 1
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+    # FO_DELETE; FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI | FOF_WANTNUKEWARNING
+    op = SHFILEOPSTRUCTW(wFunc=3, pFrom=str(path.absolute()) + "\0", fFlags=0x4 | 0x10 | 0x40 | 0x400 | 0x4000)
+    code = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    if code or op.fAnyOperationsAborted:
+        raise OSError(f"Windows did not move it (code {code:#x}{', cancelled' if op.fAnyOperationsAborted else ''})")
+
+
+def trash(path: Path) -> None:
+    """`path`, a file or a folder, into the Recycle Bin (Windows) or the trash (Linux), never deleted for good.
+    Raises OSError when it is still there."""
+    if WIN:
+        to_recycle_bin(path)
+    else:
+        to_home_trash(path)
+    if path.exists() or path.is_symlink():
+        raise OSError(f"{path} is still there")
+
+
+def inside(path: Path, folder: Path) -> bool:
+    """`path` is `folder` or in it (letter case aside on Windows)."""
+    p, f = (os.path.normcase(os.path.abspath(x)) for x in (path, folder))
+    return p == f or p.startswith(f.rstrip("\\/") + os.sep)
+
+
+def gateway_owner(settings: Path) -> Path | None:
+    """The FastStrata folder the gateway's settings serve (their polystrata_dir), None when they name none."""
+    try:
+        d = json.loads(settings.read_text(encoding="utf-8-sig")).get("polystrata_dir")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return Path(d) if isinstance(d, str) and d.strip() else None
+
+
+def gateway_port(settings: Path) -> int:
+    try:
+        return int(json.loads(settings.read_text(encoding="utf-8-sig")).get("port") or 18000)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 18000
+
+
+def listening(port: int) -> bool:
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def faststrata_shortcuts() -> list:
+    """The shortcuts make_shortcut() makes, where they are: (path, the folder it starts the app in, or None)."""
+    if WIN:
+        ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; $d=[Environment]::GetFolderPath('Desktop'); "
+              "$p=Join-Path $d 'FastStrata.lnk'; if (Test-Path -LiteralPath $p) { "
+              "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($p); Write-Output $p; "
+              "Write-Output $s.WorkingDirectory }")
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        lines = [x.strip() for x in r.stdout.splitlines() if x.strip()]
+        return [(Path(lines[0]), Path(lines[1]) if len(lines) > 1 else None)] if r.returncode == 0 and lines else []
+    found = []
+    for p in (Path.home() / ".local" / "share" / "applications" / "faststrata.desktop",
+              Path.home() / "Desktop" / "faststrata.desktop"):
+        if p.is_file():
+            m = re.search(r"^Path=(.*)$", p.read_text(encoding="utf-8", errors="replace"), re.M)
+            found.append((p, Path(m.group(1).strip()) if m else None))
+    return found
+
+
+def read_jsonc(path: Path):
+    """(OpenCode's config parsed, its comment count) as the gateway reads it; (None, 0) when it cannot be read."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return None, 0
+    comments = 0
+
+    def drop(m):
+        nonlocal comments
+        if m.group(0).startswith('"'):
+            return m.group(0)
+        comments += 1
+        return "\n" * m.group(0).count("\n") or " "
+    try:
+        data = json.loads(re.sub(r",(\s*[}\]])", r"\1", JSONC_COMMENT.sub(drop, text)))
+    except ValueError:
+        return None, comments
+    return (data if isinstance(data, dict) else None), comments
+
+
+def opencode_with_faststrata(home: Path | None = None) -> list:
+    """OpenCode's global configs (the gateway's candidate_paths()) that carry the provider `faststrata`:
+    (path, parsed config, comment count)."""
+    base = (home or Path.home()) / ".config" / "opencode"
+    found = []
+    for p in (base / "opencode.jsonc", base / "opencode.json"):
+        data, comments = read_jsonc(p) if p.is_file() else (None, 0)
+        if data is not None and OPENCODE_PROVIDER in (data.get("provider") or {}):
+            found.append((p, data, comments))
+    return found
+
+
+def without_faststrata(data: dict) -> tuple:
+    """(a copy of OpenCode's config without the provider `faststrata`, what was taken out, the keys that still name
+    one of its models).  OpenCode's default models go too where they are the provider's ("faststrata/..."): OpenCode
+    would not start a session on a model it no longer has; any other mention is only listed."""
+    new = json.loads(json.dumps(data))
+    gone = [f"provider.{OPENCODE_PROVIDER}"]
+    del new["provider"][OPENCODE_PROVIDER]
+    if not new["provider"]:
+        del new["provider"]
+    for key in ("model", "small_model"):
+        if isinstance(new.get(key), str) and new[key].startswith(OPENCODE_PROVIDER + "/"):
+            gone.append(f"{key} ({new.pop(key)})")
+
+    def refs(node, at):
+        if isinstance(node, dict):
+            return [r for k, v in node.items() for r in refs(v, f"{at}.{k}" if at else str(k))]
+        if isinstance(node, list):
+            return [r for i, v in enumerate(node) for r in refs(v, f"{at}[{i}]")]
+        return [at] if isinstance(node, str) and node.startswith(OPENCODE_PROVIDER + "/") else []
+    return new, gone, refs(new, "")
+
+
+def write_opencode(path: Path, data: dict, now: str | None = None) -> Path:
+    """`data` into OpenCode's config through a temporary file, as the gateway writes it; the file before is kept as
+    <name>.bak, or <name>.bak-<date>-<time> where a .bak is there already.  The backup's path."""
+    bak = path.with_name(path.name + ".bak")
+    if bak.exists():
+        bak = path.with_name(path.name + ".bak-" + (now or time.strftime("%Y%m%d-%H%M%S")))
+    shutil.copy2(path, bak)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return bak
+
+
+def model_files(configs) -> dict:
+    """{folder: bytes} of the model files (every .gguf an installed run config names) that are on this disk."""
+    sizes = {}
+    for cfg in configs:
+        try:
+            args = json.loads(cfg.read_text(encoding="utf-8-sig")).get("args") or []
+        except (OSError, ValueError, AttributeError):
+            continue
+        for x in dict.fromkeys(str(v) for v in args):
+            p = Path(x) if x.lower().endswith(".gguf") else None
+            if p is not None and p.is_file():
+                sizes[p.parent] = sizes.get(p.parent, 0) + p.stat().st_size
+    return sizes
+
+
+def uninstall(a, settings: Path | None = None, home: Path | None = None) -> int:
+    """--uninstall: the gateway's settings folder and the desktop shortcut to the Recycle Bin, the provider
+    `faststrata` out of OpenCode's config (a .bak first), after one question; then what is left to delete by hand."""
+    settings = settings or gateway_settings_path()
+    step("U", "Uninstall FastStrata")
+    if listening(gateway_port(settings)):
+        warn(f"the FastStrata app is running (port {gateway_port(settings)} answers): close it (its tray icon > Quit), "
+             f"then run {'UNINSTALL.bat' if WIN else 'python3 setup.py --uninstall'} again. Nothing was changed")
+        return 1
+
+    def ours(what: str, owner: Path | None) -> bool:   # another FastStrata folder's, on this PC still: asked, no
+        if owner is None or inside(owner, ROOT) or not owner.is_dir():
+            return True
+        return ask(f"  {what}: set up from {owner}, not from this folder. Remove it too?", ["y", "n"], "n",
+                   a.yes) == "y"
+    to_bin = []
+    if settings.parent.is_dir() and ours(f"The gateway's settings ({settings.parent})", gateway_owner(settings)):
+        to_bin.append((settings.parent, "the FastStrata Gateway's settings"))
+    for link, workdir in faststrata_shortcuts():
+        if ours(f"The shortcut {link}", workdir):
+            to_bin.append((link, "the shortcut FastStrata"))
+    edits = []
+    for path, data, comments in opencode_with_faststrata(home):
+        if comments and ask(f"  OpenCode's config {path} has {comments} comment(s), which writing it deletes (the .bak "
+                            "keeps them). Take FastStrata out of it anyway?", ["y", "n"], "n", a.yes) != "y":
+            warn(f"{path} is left as it is: delete its provider \"{OPENCODE_PROVIDER}\" yourself")
+            continue
+        edits.append((path, *without_faststrata(data)))
+
+    if to_bin or edits:
+        say("  This takes out what setup put outside this folder:")
+        for path, what in to_bin:
+            say(f"    to the {'Recycle Bin' if WIN else 'trash'}: {path} ({what})")
+        for path, _, gone, _ in edits:
+            say(f"    out of OpenCode's config {path}: {', '.join(gone)} (the file is kept as a .bak first)")
+        if not a.yes and ask("  Go on?", ["y", "n"], "n", False) != "y":
+            say("  Nothing was changed.")
+            return 0
+        for path, what in to_bin:
+            try:
+                trash(path)
+                ok(f"{what}: in the {'Recycle Bin' if WIN else 'trash'} ({path})")
+            except OSError as e:
+                warn(f"{what} stays in {path} ({e}): delete it yourself")
+        for path, new, gone, refs in edits:
+            try:
+                bak = write_opencode(path, new)
+                ok(f"OpenCode's config without {', '.join(gone)} (the file before: {bak.name})")
+            except OSError as e:
+                warn(f"OpenCode's config {path} was not written ({e}): delete its provider \"{OPENCODE_PROVIDER}\" "
+                     "yourself")
+                continue
+            if refs:
+                warn(f"{path} still names FastStrata's models in {', '.join(refs)}: change them in OpenCode")
+    else:
+        say("  Nothing of FastStrata's is outside this folder: no gateway settings, no shortcut, no OpenCode provider.")
+
+    say()
+    say("  Left for you to delete, when you no longer want them:")
+    say(f"    {ROOT}: this folder (the engine, the gateway, their Python environments, the run configs, the logs)")
+    others = [d for d in other_installs(load_settings()) if not inside(d, ROOT)]
+    for folder, size in model_files(installed_configs()).items():
+        say(f"    {folder}: the model files, {size / 1e9:.1f} GB"
+            + (f" (other FastStrata folders may use them: {', '.join(str(d) for d in others[:3])})" if others else ""))
+    say("  OpenCode, Python and the build tools setup may have installed (Visual Studio Build Tools, the CUDA toolkit)")
+    say("  stay: remove them in " + ("Windows Settings > Apps" if WIN else "your package manager")
+        + " where nothing else needs them.")
     return 0
 
 
@@ -7657,10 +8194,19 @@ def main() -> int:
                          "DeepSeek V4 Flash, qwen36 = Qwen3.6-35B-A3B on strata-poly, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel "
                          "Coder 35B-A3B (docs/BACKENDS.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
                          "own engine (UD-Q4_K_XL and up, 32 GB of RAM or more)")
-    ap.add_argument("--model", choices=list(dict.fromkeys(
-        [*MODELS, *(m for f in FAMILIES.values() for m in f.get("models", {})),
-         *(m for f in PREVIEW_FAMILIES.values() for m in f["models"])])))
-    ap.add_argument("--context", type=int)
+    known = list(dict.fromkeys([*MODELS, *(m for f in FAMILIES.values() for m in f.get("models", {})),
+                                *(m for f in PREVIEW_FAMILIES.values() for m in f["models"])]))
+    ap.add_argument("--model", action="append", dest="model_list", choices=known,
+                    help="the model to install, e.g. UD-Q4_K_M (FastStrata's presets: UD-Q4_K_M and UD-Q3_K_M of "
+                         "Qwen3.6, APEX-I-QUALITY and APEX-I-COMPACT of Ornith 1.5); given more than once, several "
+                         "of them. Default: asked (Enter or --yes: the one recommended for this PC)")
+    ap.add_argument("--models", metavar="A,B",
+                    help="several of FastStrata's presets at once, e.g. --models UD-Q4_K_M,APEX-I-QUALITY: each with "
+                         "its own context, one runs at a time (the gateway swaps them); the first is started first")
+    ap.add_argument("--context", action="append", metavar="N|MODEL=N",
+                    help="the context in tokens: N (147456, or 144K) for every model, MODEL=N for one (--context "
+                         "UD-Q4_K_M=147456,APEX-I-QUALITY=65536). Default: asked (Enter or --yes: the one recommended "
+                         "for this PC)")
     ap.add_argument("--rope-scaling", choices=["none", "linear", "yarn"],
                     help="the RoPE extension for a context past the model's trained 262144: linear (position "
                          "interpolation) or yarn - llama.cpp's types. Omitted with a scaled context, the setup "
@@ -7727,6 +8273,10 @@ def main() -> int:
     ap.add_argument("--opencode", choices=["ask", "install", "skip"], default="ask",
                     help="OpenCode where it is missing: ask (default; --yes skips it), install (npm or scoop), skip")
     ap.add_argument("--no-shortcut", action="store_true", help="no desktop shortcut for the FastStrata app")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="take out what setup put outside this folder: the gateway's settings and the desktop shortcut "
+                         "to the Recycle Bin, the provider faststrata out of OpenCode's config (a .bak first); this "
+                         "folder and the model files are yours to delete, and it says where they are (UNINSTALL.bat)")
     ap.add_argument("--details", action="store_true",
                     help="show the long explanations and every command on the screen too (the log always has them)")
     ap.add_argument("--update", action="store_true",
@@ -7788,6 +8338,30 @@ def main() -> int:
                          "sycl = Intel Arc, EXPERIMENTAL: Linux, built from source (docs/INTEL_ARC.md)")
     ap.add_argument("--skip-build", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
+    # FASTSTRATA MULTI: --model given more than once, or --models A,B: several of FastStrata's presets, each with its
+    # own --context MODEL=N (or the N for every one)
+    names = list(a.model_list or [])
+    for m in (x.strip() for x in (a.models or "").split(",")):
+        if m:
+            name = next((k for k in known if k.upper() == m.upper()), None)
+            if name is None:
+                ap.error(f"--models: no model {m} (FastStrata's: " + ", ".join(k[1] for k in FASTSTRATA_PRESETS) + ")")
+            names.append(name)
+    names = list(dict.fromkeys(names))
+    a.model, a.models = (names[0] if names else None), (names if len(names) > 1 else None)
+    if a.models:
+        allowed = [k[1] for k in FASTSTRATA_PRESETS if a.family in (None, k[0])]
+        other = [m for m in a.models if m not in allowed]
+        if other:
+            ap.error("several models at once: FastStrata's presets (" + ", ".join(k[1] for k in FASTSTRATA_PRESETS)
+                     + ")" + (f" of --family {a.family}" if a.family else "") + f", not {', '.join(other)}")
+    try:
+        a.context, a.context_for = parse_contexts(a.context, known)
+    except ValueError as e:
+        ap.error(str(e))
+    stray = [m for m in a.context_for if names and m not in names]
+    if stray:
+        ap.error(f"--context {stray[0]}=...: {stray[0]} is not among the models named ({', '.join(names)})")
     # a strata-poly family's own size (FAMILIES[f]["models"]) is checked by poly_setup, which names the family
     if a.model and a.model not in MODELS and a.family not in PREVIEW_FAMILIES and             not any(a.model in d.get("models", {}) for d in FAMILIES.values()):
         ap.error(f"--model {a.model} is a size of " + ", ".join(f"--family {f}" for f, d in PREVIEW_FAMILIES.items()
@@ -7813,7 +8387,9 @@ def main() -> int:
             ap.error(f"--gpu takes a GPU number as nvidia-smi numbers them, e.g. --gpu 1 (or --gpus 0,2), not {a.gpu!r}")
     global DETAILS
     DETAILS = a.details
-    say("FastStrata - Qwen3.6-35B-A3B and Ornith 1.5 on a gaming PC (a GPU + system RAM + CPU)")
+    say(f"FastStrata {FASTSTRATA_VERSION} - Qwen3.6-35B-A3B and Ornith 1.5 on a gaming PC (a GPU + system RAM + CPU)")
+    if a.uninstall:                                    # FASTSTRATA UNINSTALL: before the data folder moves anything
+        return uninstall(a)
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
     roots = [data, *elsewhere]
     if a.models_dir is None:
@@ -7829,14 +8405,26 @@ def main() -> int:
     if a.gateway == "on" and have and not (a.setup or a.model or a.family or a.check):
         return 0 if faststrata_gateway(a) is not None else 1   # the gateway for the models already here, and no more
     explicit = a.setup or a.model or a.family or a.check or a.no_start
+    a.yes_given = a.yes                                # the user's own --yes: a copy set up like an earlier install
     adopted = None                                     # #629: the earlier install this copy is set up like
     if not have and not explicit:                      # a new copy of FastStrata (an update unzipped elsewhere): set it
         prev = previous_config(elsewhere, load_settings())   # up like the last one, from the files already here
         if prev is not None:
             ch = choices_from_config(prev)
             if ch["model"]:
-                say(f"  Found your earlier install in {prev.parent} ({prev.stem[len('strata-'):]}): setting up this "
-                    "copy the same way - the model files are reused, nothing big is downloaded.")
+                # FASTSTRATA MULTI: every FastStrata model of that install, each with its context and images; the
+                # gateway as it had it (faststrata_gateway(): taken over, or offered)
+                same = faststrata_earlier(prev) if (ch["family"], ch["model"]) in FASTSTRATA_PRESETS else [prev]
+                if len(same) > 1:
+                    a.picks = []
+                    for c in same:
+                        was = choices_from_config(c)
+                        a.picks.append({"family": was["family"], "model": was["model"], "adopted": c,
+                                        "context": context_given(a, was["model"]) or was["context"],
+                                        "vision": a.vision or was["vision"]})
+                a.gateway_before = earlier_gateway(prev.parent)
+                say(f"  Found your earlier install in {prev.parent} ({', '.join(c.stem[len('strata-'):] for c in same)}): "
+                    "setting up this copy the same way - the model files are reused, nothing big is downloaded.")
                 a.family, a.model, a.context = ch["family"], ch["model"], a.context or ch["context"]
                 adopted = prev
                 a.kv = a.kv or ch["kv"]
@@ -8142,31 +8730,21 @@ def main() -> int:
     # ---- 2. the questions
     step(2, "your choices")
     fams = menu_families(hip)
-    if named:
+    picks = getattr(a, "picks", None)                  # FASTSTRATA MULTI: an earlier install's FastStrata models
+    if picks is None and a.models:                     # --models, or --model more than once: no menu
+        a.model_named = True
+        picks = [{"family": a.family or next(k[0] for k in FASTSTRATA_PRESETS if k[1] == m), "model": m,
+                  "context": None} for m in a.models]
+    if picks:
+        family, a.model = picks[0]["family"], picks[0]["model"]
+    elif named:
         family = named
     elif not hip and fams == [f for f in FASTSTRATA_FAMILIES if f in FAMILIES] and \
             all(k[0] in fams for k in FASTSTRATA_PRESETS):
-        # FASTSTRATA UX: one menu of the four presets, judged for this PC from what was measured (faststrata_fit())
-        a.model_named = bool(a.model)
-        presets = [k for k in FASTSTRATA_PRESETS if a.model in (None, k[1])]
-        fit_vram = gpu.get("model_vram_gb", gpu["vram_gb"])
-        least = min(presets, key=lambda k: poly_ram_need(FAMILIES[k[0]]["models"][k[1]], fit_vram))
-        rec = faststrata_pick(ram, fit_vram) or least   # none fits: the one that wants the least
-        rec = rec if rec in presets else least
-        if len(presets) > 1:
-            say(f"  Which model?  Judged for this PC ({gpu['name']}, {gpu['vram_gb']:.0f} GB of VRAM, {ram:.0f} GB "
-                "of RAM);")
-            say("  speed: writing after a 37K prompt on the 6 GB test laptop.")
-            for i, (f, m) in enumerate(presets, 1):
-                pr, size = FASTSTRATA_PRESETS[(f, m)], FAMILIES[f]["models"][m]
-                say(f"  {i}) {FAMILIES[f]['title']} {pr['name']} ({m}), download {size['download_gb']:.0f} GB")
-                say(f"     {faststrata_fit_text(f, m, ram, fit_vram)}; {pr['tok_s_37k']} tok/s; {pr['quality']}"
-                    + ("   (recommended)" if (f, m) == rec else ""))
-            pick = presets[int(ask("Which one?", [str(i) for i in range(1, len(presets) + 1)],
-                                   str(presets.index(rec) + 1), a.yes)) - 1]
-        else:
-            pick = presets[0]
-        family, a.model = pick
+        # FASTSTRATA UX: the recommended preset, or one menu of the four, judged for this PC from what was measured
+        # (faststrata_fit()); FASTSTRATA MULTI: one or several of them (faststrata_menu())
+        picks = faststrata_menu(a, gpu, ram, have)
+        family, a.model = picks[0]["family"], picks[0]["model"]
     else:
         rec_fam = STRIX_HALO_FAMILY if strix_halo_recommends(gpu, ram) and STRIX_HALO_FAMILY in fams else fams[0]
         for i, f in enumerate(fams, 1):
@@ -8188,11 +8766,14 @@ def main() -> int:
     if fam.get("ready") and a.gguf_dir:
         warn(f"--gguf-dir does not apply to {fam['title']}: its files are ready-made packs, not GGUF shards")
         a.gguf_dir = None
-    ok(f"model: {fam['title']}")
+    if picks and len(picks) > 1:
+        ok("models: " + ", ".join(f"{preset_label(p['family'], p['model'])} ({p['model']})" for p in picks))
+    else:
+        ok(f"model: {fam['title']}")
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")
     if fam.get("engine") == "poly":                     # another engine: its own questions and steps
-        return poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted)
+        return poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, adopted, picks)
     say()
     names = [m for m in MODELS if family in MODELS[m].get("families", ("qwen", "swift"))]
     names.sort(key=lambda m: bool(MODELS[m].get("experimental")))   # an experimental size last, never the default

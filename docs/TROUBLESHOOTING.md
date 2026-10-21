@@ -4,7 +4,7 @@
 > GLM, Gemma 4, ...). FastStrata runs Qwen3.6-35B-A3B and Ornith 1.5 only: its presets, numbers and quick start
 > are in the [README](../README.md).
 
-The common problems and what to do. Back to the [README](../README.md#install-and-quick-start). The full table of
+The common problems and what to do. Back to the [README](../README.md#install-in-three-steps). The full table of
 error messages, with the older engine fixes, is in the [details](DETAILS.md#troubleshooting).
 
 ## While installing or starting

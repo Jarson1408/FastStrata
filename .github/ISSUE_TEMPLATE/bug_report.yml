@@ -19,8 +19,8 @@ body:
     id: hardware
     attributes:
       label: FastStrata version, GPU, OS
-      description: The engine version is on the About tab, or in `GET /v1/status` under `engine`.
-      placeholder: "0.1.31 · RTX 5070 12GB · Windows 11"
+      description: FastStrata's version is on the first line of setup's screen and of its log; the engine's is on the web app's About tab, or in `GET /v1/status` under `engine`.
+      placeholder: "FastStrata 0.1.0 · RTX 3060 Laptop 6 GB · Windows 11"
     validations:
       required: true
   - type: textarea

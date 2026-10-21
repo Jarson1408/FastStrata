@@ -1,0 +1,49 @@
+name: Benchmark result
+description: Share what FastStrata does on your PC (BENCH.bat / ./bench.sh)
+title: "[Benchmark]: "
+labels: ["benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Results from other cards and PCs are how FastStrata's estimates get replaced by measurements.
+
+        Run `BENCH.bat` (Linux: `./bench.sh`) in your FastStrata folder with other programs closed. It writes
+        `bench/results/<date>-community-<gpu>-<model>/README.md`, with home folders, user and host names and keys
+        already replaced. Read it once, then drag it into the box below.
+  - type: input
+    id: machine
+    attributes:
+      label: Card, CPU, RAM, system
+      placeholder: "RTX 4060 Laptop 8 GB · Ryzen 7 7840HS · 32 GB DDR5-5600 · Windows 11"
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: FastStrata version, preset and context
+      description: The version is on the first line of setup's screen and of its log; the preset and context are the ones setup installed.
+      placeholder: "FastStrata 0.1.0 · Qwen3.6 UD-Q4_K_M · 144K · 8-bit cache"
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: The benchmark's README.md
+      description: Drag the file in, or paste its text.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: What else was running, and what you did not test
+      description: A browser, a game, a power limit or a laptop on battery changes the numbers.
+    validations:
+      required: false
+  - type: checkboxes
+    id: table
+    attributes:
+      label: The table
+      options:
+        - label: My numbers may be listed in docs/COMMUNITY_BENCHMARKS.md with my GitHub name.
+          required: false

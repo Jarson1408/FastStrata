@@ -1,0 +1,29 @@
+# Setup's own tests (tools/run_setup_tests.py: every tools/test_setup_*.py and tools/test_faststrata_names.py) on
+# Windows and Linux. They need no GPU and download nothing: the card, the network and the user's folders are stand-ins.
+# The engine is not built here.
+name: setup tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-tests:
+    name: setup tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # what START-HERE.bat installs where a PC has no Python
+      - name: Setup's tests
+        run: python tools/run_setup_tests.py
