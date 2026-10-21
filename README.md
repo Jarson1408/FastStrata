@@ -1,7 +1,7 @@
 <h1 align="center">FastStrata</h1>
 
-<p align="center"><b>A 35B mixture-of-experts coding model on a gaming PC with a small graphics card</b><br>
-Qwen3.6-35B-A3B and Ornith 1.5 · Windows and Linux · NVIDIA · MIT</p>
+<p align="center"><b>A 35B mixture-of-experts coding model for OpenCode on a gaming PC with a small graphics card</b><br>
+Qwen3.6-35B-A3B and Ornith 1.5 · its own gateway for OpenCode · Windows and Linux · NVIDIA · MIT</p>
 
 <p align="center">
 <a href="https://github.com/Jarson1408/FastStrata/actions/workflows/setup-tests.yml"><img src="https://github.com/Jarson1408/FastStrata/actions/workflows/setup-tests.yml/badge.svg" alt="setup tests"></a>
@@ -20,6 +20,14 @@ FastStrata runs Qwen3.6-35B-A3B, a coding model of 35 billion weights of which 3
 gaming laptop with a 6 GB graphics card. On an RTX 3060 Laptop with 64 GB of RAM it writes **72 tok/s after a short
 prompt, 67 after a 37K-token one and 49 after 139K**, with a 144K context. The card holds the attention and the
 experts an answer uses most; the processor computes the rest from RAM.
+
+**Made for [OpenCode](https://opencode.ai), with its own gateway.** The [FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway) is part of this
+project: an app between OpenCode and the model, written for OpenCode, which setup installs with the model. Setup also
+finds OpenCode (or installs it), adds the provider **FastStrata** to its config and puts a **FastStrata** shortcut on
+the desktop: one click starts the gateway, and the gateway starts the model when OpenCode asks. It turns the model's
+tool calls into the ones OpenCode reads, stops a turn that loops, swaps between the installed models, and can hold a
+small model to a project's memory ([LODESTAR](#lodestar-project-memory-for-a-small-model)).
+[More](#opencode-and-the-faststrata-gateway)
 
 It is a fork of [PolyStrata](https://github.com/VecSzn/PolyStrata) that made the same laptop up to twice as fast:
 x1.27 after a short prompt, x1.60 after 37K, x1.98 after 139K, and x1.33 for a coding agent's session. Every number
@@ -57,8 +65,8 @@ reports. The full table by card and preset: [docs/RESULTS.md](docs/RESULTS.md#wh
 1. **Download** [the zip][zip] and unzip it anywhere, or `git clone` [the repository][repo].
 2. **Run setup:** on Windows double-click **`START-HERE.bat`**; on Linux run **`./setup.sh`** in the folder. Press
    Enter to take what it recommends.
-3. **Use it:** open OpenCode and pick a model of the provider **FastStrata**, or chat in the browser at
-   `http://127.0.0.1:8080`.
+3. **Use it:** start the **FastStrata** shortcut, open OpenCode and pick a model of the provider **FastStrata**
+   (setup put the gateway and OpenCode's config in place), or chat in the browser at `http://127.0.0.1:8080`.
 
 In step 2 setup checks the PC and recommends a preset and a context for it: Enter installs that one with no more
 questions. Or choose yourself from the four presets judged for this PC, with the speed measured on the test laptop and
@@ -123,13 +131,14 @@ What each change gave, every preset in full, prompt reading times and what the s
   `/v1/responses`; llama.cpp's `/completion` and `/tokenize`.
 - **From another device:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Never without a key.
 
-### OpenCode and the FastStrata Gateway
+## OpenCode and the FastStrata Gateway
 
-After the model, setup offers the [FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway), the app
-between [OpenCode](https://opencode.ai) and the model. It turns the model's tool calls into the ones OpenCode reads,
-stops a turn that loops, starts the model when OpenCode asks for it and swaps it for another installed preset, and runs
-the [LODESTAR](#lodestar-project-memory-for-a-small-model) project memory (off at the start, with a switch). Say
-yes, and setup:
+FastStrata is made to be used from [OpenCode](https://opencode.ai), and its own gateway is what makes that work. The
+[FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway) is the app between OpenCode and the model, written for OpenCode and integrated into this
+project: setup installs it in `gateway\` here, pinned to one release and checked by its files' SHA-256. It turns the
+model's tool calls into the ones OpenCode reads, stops a turn that loops, starts the model when OpenCode asks for it and
+swaps it for another installed preset, and runs the [LODESTAR](#lodestar-project-memory-for-a-small-model) project
+memory (off at the start, with a switch). After the model, setup offers it; say yes, and setup:
 
 - puts the gateway in `gateway\` in this folder, with its own Python environment (about 300 MB);
 - writes the installed presets into its settings, each with the context setup chose for this PC;

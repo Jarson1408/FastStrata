@@ -1,7 +1,7 @@
 <h1 align="center">FastStrata</h1>
 
-<p align="center"><b>Model 35B typu mixture-of-experts do programowania na komputerze do gier z małą kartą graficzną</b><br>
-Qwen3.6-35B-A3B i Ornith 1.5 · Windows i Linux · NVIDIA · MIT</p>
+<p align="center"><b>Model 35B typu mixture-of-experts do programowania w OpenCode na komputerze do gier z małą kartą graficzną</b><br>
+Qwen3.6-35B-A3B i Ornith 1.5 · własna bramka dla OpenCode · Windows i Linux · NVIDIA · MIT</p>
 
 <p align="center">
 <a href="https://github.com/Jarson1408/FastStrata/actions/workflows/setup-tests.yml"><img src="https://github.com/Jarson1408/FastStrata/actions/workflows/setup-tests.yml/badge.svg" alt="testy setupu"></a>
@@ -20,6 +20,14 @@ FastStrata uruchamia Qwen3.6-35B-A3B, model do programowania z 35 miliardami wag
 miliardy, na laptopie do gier z kartą graficzną 6 GB. Na RTX 3060 Laptop z 64 GB RAM pisze **72 tok/s po krótkim
 prompcie, 67 po prompcie 37K tokenów i 49 po 139K**, z kontekstem 144K. Karta trzyma warstwy uwagi (attention) i
 ekspertów, których odpowiedź używa najczęściej; resztę liczy procesor z RAM.
+
+**Zrobiona dla [OpenCode](https://opencode.ai), z własną bramką.** [FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway) jest częścią tego
+projektu: to aplikacja między OpenCode a modelem, napisana pod OpenCode, którą setup instaluje razem z modelem. Setup
+znajduje też OpenCode (albo go instaluje), dodaje do jego konfiguracji dostawcę **FastStrata** i tworzy na pulpicie
+skrót **FastStrata**: jedno kliknięcie uruchamia bramkę, a bramka uruchamia model, gdy OpenCode o niego prosi.
+Zamienia wywołania narzędzi modelu na takie, które OpenCode czyta, przerywa turę, która się zapętla, przełącza
+zainstalowane modele i potrafi trzymać mały model przy pamięci projektu
+([LODESTAR](#lodestar-pamięć-projektu-dla-małego-modelu)). [Więcej](#opencode-i-faststrata-gateway)
 
 To fork [PolyStrata](https://github.com/VecSzn/PolyStrata), który na tym samym laptopie działa do dwóch razy
 szybciej: x1,27 po krótkim prompcie, x1,60 po 37K, x1,98 po 139K i x1,33 w sesji agenta programistycznego. Każdą liczbę
@@ -57,8 +65,8 @@ pokazuje wynik. Pełna tabela według karty i presetu: [docs/RESULTS.pl.md](docs
 1. **Pobierz** [zip][zip] i rozpakuj go gdziekolwiek albo zrób `git clone` [repozytorium][repo].
 2. **Uruchom setup:** na Windows kliknij dwukrotnie **`START-HERE.bat`**; na Linuksie uruchom w folderze
    **`./setup.sh`**. Naciskaj Enter, żeby wybrać to, co poleca.
-3. **Używaj:** otwórz OpenCode i wybierz model dostawcy **FastStrata** albo rozmawiaj w przeglądarce pod
-   `http://127.0.0.1:8080`.
+3. **Używaj:** uruchom skrót **FastStrata**, otwórz OpenCode i wybierz model dostawcy **FastStrata** (setup
+   zainstalował bramkę i wpisał konfigurację OpenCode) albo rozmawiaj w przeglądarce pod `http://127.0.0.1:8080`.
 
 W kroku 2 setup sprawdza komputer i poleca dla niego preset z kontekstem: Enter instaluje go bez dalszych pytań. Albo
 wybierz sam z czterech presetów ocenionych dla tego komputera, z prędkością zmierzoną na laptopie testowym i z tym, ile
@@ -125,13 +133,15 @@ Co dała każda zmiana, każdy preset w całości, czasy czytania promptu i ile 
   Responses API pod `/v1/responses`; `/completion` i `/tokenize` w stylu llama.cpp.
 - **Z innego urządzenia:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <sekret>`. Nigdy bez klucza.
 
-### OpenCode i FastStrata Gateway
+## OpenCode i FastStrata Gateway
 
-Po modelu setup proponuje [FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway), aplikację między
-[OpenCode](https://opencode.ai) a modelem. Zamienia wywołania narzędzi modelu na takie, które OpenCode czyta, przerywa
-turę, która się zapętla, uruchamia model, gdy OpenCode o niego prosi, i przełącza go na inny zainstalowany preset, oraz
-prowadzi pamięć projektu [LODESTAR](#lodestar-pamięć-projektu-dla-małego-modelu) (na starcie wyłączoną, z
-przełącznikiem). Po odpowiedzi „tak” setup:
+FastStrata jest zrobiona do pracy w [OpenCode](https://opencode.ai), a jej własna bramka sprawia, że to działa.
+[FastStrata Gateway](https://github.com/Jarson1408/FastStrata-Gateway) to aplikacja między OpenCode a modelem, napisana pod OpenCode i zintegrowana z tym
+projektem: setup instaluje ją tutaj w `gateway\`, przypiętą do jednego wydania i sprawdzoną przez SHA-256 jej plików.
+Zamienia wywołania narzędzi modelu na takie, które OpenCode czyta, przerywa turę, która się zapętla, uruchamia model,
+gdy OpenCode o niego prosi, i przełącza go na inny zainstalowany preset, oraz prowadzi pamięć projektu
+[LODESTAR](#lodestar-pamięć-projektu-dla-małego-modelu) (na starcie wyłączoną, z przełącznikiem). Po modelu setup ją
+proponuje; po odpowiedzi „tak” setup:
 
 - umieszcza bramkę w `gateway\` w tym folderze, z własnym środowiskiem Pythona (około 300 MB);
 - wpisuje zainstalowane presety do jej ustawień, każdy z kontekstem, który setup wybrał dla tego komputera;
