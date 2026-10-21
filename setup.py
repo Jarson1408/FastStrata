@@ -7422,8 +7422,8 @@ def poly_install(a, p, gpu, hip, multi, ram, data, elsewhere, port, cuda_tk, lla
 # OpenCode where it is missing, and makes a desktop shortcut for the gateway's app.  The gateway is pinned: one commit,
 # checked by the SHA-256 of its files (GitHub may recompress an archive, the files stay), never "the latest".
 GATEWAY_REPO = "https://github.com/Jarson1408/FastStrata-Gateway"
-GATEWAY_COMMIT = "e3e44c7dcb31e3a744871186f96586e690b4e4b4"
-GATEWAY_FILES_SHA256 = "a1c3397fed9879997fc17b475500793c4ab6558f75932f169bdf3951cc518dc5"   # gateway_files_sha256()
+GATEWAY_COMMIT = "47f4cd86d9efddc37a46a4e325c5fa94ab94e125"
+GATEWAY_FILES_SHA256 = "bb0046390549a1358141772e9f0180b9998f8b4779f8fb7e697afd680d9c8e7e"   # gateway_files_sha256()
 GATEWAY_DIR = ROOT / "gateway"
 GATEWAY_MARK = ".faststrata-gateway-commit"
 GATEWAY_PYTHON = (3, 12)                               # the gateway's pyproject.toml: requires-python >=3.12
