@@ -40,7 +40,7 @@ class TestTheFitIsWhatWasMeasured(unittest.TestCase):
     def test_an_8_gb_card_gets_the_estimate_less_10_percent(self):
         """No 8 GB card was measured: setup's estimate (about 276K would fit) less 10%, said to be an estimate."""
         self.assertEqual(setup.faststrata_fit_info("qwen36", "UD-Q4_K_M", 31.7, 8.0), (253952, "q8", ""))
-        self.assertIn("up to 248K context (estimated)",
+        self.assertIn("up to 248K context with an 8-bit cache (estimated)",
                       setup.faststrata_fit_text("qwen36", "UD-Q4_K_M", 31.7, 8.0))
 
     def test_a_card_that_holds_more_keeps_the_whole_window(self):

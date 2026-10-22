@@ -6206,11 +6206,17 @@ def faststrata_pick(ram, vram_gb, families=None) -> tuple | None:
     return next((k for k in order if fits[k] >= 32768), None) or next((k for k in order if fits[k]), None)
 
 
+# FASTSTRATA UX: the context's memory (the attention cache) is named apart from the model's Q4 / Q3, which is the
+# model file's weights: "Q4 with an 8-bit cache" was read as one thing
+CACHE_WORDS = {"f16": "a 16-bit cache", "q8": "an 8-bit cache", "q4": "a 4-bit cache", "q4k4": "a 4-bit cache"}
+
+
 def faststrata_fit_text(family, model, ram, vram_gb) -> str:
     """What the menu says of a preset on this PC."""
-    ctx, _cache, measured = faststrata_fit_info(family, model, ram, vram_gb)
+    ctx, cache, measured = faststrata_fit_info(family, model, ram, vram_gb)
     if ctx:
-        return f"fits this PC, up to {ctx // 1024}K context ({'measured on ' + measured if measured else 'estimated'})"
+        return (f"fits this PC, up to {ctx // 1024}K context with {CACHE_WORDS[cache]} "
+                f"({'measured on ' + measured if measured else 'estimated'})")
     d = FAMILIES[family]["models"][model]
     if ram < poly_ram_need(d, vram_gb) - 4:
         return f"too big for this PC's RAM (wants about {poly_ram_need(d, vram_gb):.0f} GB)"
@@ -7143,9 +7149,12 @@ def poly_choices(a, pick, gpu, hip, cuda_tk, multi, ram, elsewhere, adopted, sha
             say("  Context = how much the model sees at once (the chat, files, tool output). OpenCode works best with "
                 "a long")
             say("  one; a longer one costs VRAM, and a long prompt takes a while to read the first time.")
+            say("  Its memory (the attention cache) is apart from the model's Q4 / Q3: setup keeps it in 16 bits where")
+            say("  they fit the card and in 8 bits where they do not (--kv-q8, 11.7 KB a token instead of 22).")
         if fit_ctx:
             on = f"{preset_label(family, model)} on this card" if several else "This card"
-            say(f"  {on}: up to {fit_ctx // 1024}K, " + (f"measured on {measured}." if measured else
+            say(f"  {on}: up to {fit_ctx // 1024}K with {CACHE_WORDS.get(fit_cache, 'its cache')}, " +
+                (f"measured on {measured}." if measured else
                 "estimated (setup's estimate less 10%; reports from other PCs will correct it)."))
             if gpu.get("desktop_on_card") and rec < min(fit_ctx, 147456):
                 say(f"  The desktop is on this card too: the safe context is {rec // 1024}K, 10% below the longest.")

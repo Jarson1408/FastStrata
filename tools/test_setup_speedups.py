@@ -679,7 +679,7 @@ class Install(unittest.TestCase):
         self.assertTrue(menu[4].strip().startswith("3) Ornith 1.5 35B-A3B Quality (APEX-I-QUALITY)"), menu)
         self.assertTrue(menu[5].strip().startswith("4) Ornith 1.5 35B-A3B Compact (APEX-I-COMPACT)"), menu)
         # an 8 GB card: no measurement, so setup's estimate less 10%, said to be one
-        self.assertIn("fits this PC, up to 248K context (estimated); 66.9 tok/s; the most exact   (safe)", out)
+        self.assertIn("fits this PC, up to 248K context with an 8-bit cache (estimated); 66.9 tok/s; the most exact   (safe)", out)
         asked = [q.split("?")[0].strip() for q in self.asked]
         self.assertEqual(asked[:3], ["Is the desktop on the NVIDIA card", "Which way", "Which ones"])
         self.assertNotIn("Size", asked)

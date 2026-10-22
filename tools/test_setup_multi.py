@@ -203,7 +203,7 @@ class TheRecommendedWay(Case):
         self.assertEqual(code, 0, out)
         self.assertIn("The safe choice for this PC (NVIDIA GeForce RTX 3060 Laptop GPU, 6 GB of VRAM, 60 GB of RAM):", out)
         self.assertIn("Qwen3.6-35B-A3B Q4 (UD-Q4_K_M) with a 144K context, download 23 GB", out)
-        self.assertIn("fits this PC, up to 144K context (measured on a 6 GB card); 66.9 tok/s; the most exact", out)
+        self.assertIn("fits this PC, up to 144K context with an 8-bit cache (measured on a 6 GB card); 66.9 tok/s; the most exact", out)
         self.assertEqual(self.m.questions, [DESKTOP, "Which way", "Do you want images", "Keep conversations in RAM", GATEWAY])
         self.assertNotIn("Which models?", out)
         self.assertEqual(arg(self.m.config(Q4), "--max-context"), "147456")

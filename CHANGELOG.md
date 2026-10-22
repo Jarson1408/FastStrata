@@ -5,6 +5,11 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
+## Unreleased
+
+- The context's memory (the attention cache) is named apart from the model's Q4 / Q3: setup's menu says "up to 144K
+  context with an 8-bit cache", the context question says what the cache is, and the README explains the two.
+
 ## v0.1.1 - 2026-10-22
 
 Setup and the gateway, from the first installs on other PCs. The engine is the same as in v0.1.0: this release

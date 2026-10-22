@@ -46,9 +46,15 @@ Jedna karta NVIDIA, GeForce z serii RTX 20 lub nowsza:
 
 | VRAM | Co daje | Skąd to wiadomo |
 | --- | --- | --- |
-| **4 GB: minimum** | Krótki kontekst, 16K do 48K, pisanie z prędkością 42–56 tok/s. 32K to najmniej, z czym agent programistyczny taki jak OpenCode pracuje wygodnie. | Zmierzone na symulowanej karcie 4 GB: karcie 6 GB, której 2 GiB zajmuje inny program ([jak](docs/RESULTS.pl.md#na-karcie-4-gb-do-gier)) |
-| **6 GB: rozsądnie** | **Kontekst 144K** z modelem Q4, pisanie z prędkością 49–72 tok/s. | Zmierzone: [laptop testowy](docs/RESULTS.pl.md#komputer-testowy) |
-| **8 GB: optymalnie** | Około 248K z Q4 i więcej ekspertów w VRAM. | Szacunek setupu pomniejszony o 10%; nie mierzono z FastStrata |
+| **4 GB: minimum** | Krótki kontekst, 16K do 48K z pamięcią 8-bitową, pisanie z prędkością 42–56 tok/s. 32K to najmniej, z czym agent programistyczny taki jak OpenCode pracuje wygodnie. | Zmierzone na symulowanej karcie 4 GB: karcie 6 GB, której 2 GiB zajmuje inny program ([jak](docs/RESULTS.pl.md#na-karcie-4-gb-do-gier)) |
+| **6 GB: rozsądnie** | **Kontekst 144K** z modelem Q4 i pamięcią 8-bitową, pisanie z prędkością 49–72 tok/s. | Zmierzone: [laptop testowy](docs/RESULTS.pl.md#komputer-testowy) |
+| **8 GB: optymalnie** | Około 248K z modelem Q4 i pamięcią 8-bitową (144K z 16-bitową) i więcej ekspertów w VRAM. | Szacunek setupu pomniejszony o 10%; nie mierzono z FastStrata |
+
+**Q4 i pamięć 8-bitowa to dwie różne rzeczy.** *Q4* (albo *Q3*) to **plik modelu**: ile bitów zajmują jego wagi
+(UD-Q4_K_M 23 GB, UD-Q3_K_M 17 GB); od tego zależy, ile RAM potrzebuje i jak jest dokładny. **Pamięć** to **pamięć
+kontekstu**, pamięć uwagi (attention cache), która trzyma rozmowę: w **8 bitach** (`--kv-q8`) token zajmuje 11,7 KB
+zamiast 22 KB przy 16 bitach i dzięki temu 144K mieści się na karcie 6 GB. Setup dobiera pamięć do karty: 16 bitów,
+gdzie się mieszczą, 8 tam, gdzie nie, a 4 bity (`--kv-q4`, mniej dokładne) tylko tam, gdzie nie mieści się nawet 8.
 
 | | |
 | --- | --- |

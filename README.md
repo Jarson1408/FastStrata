@@ -46,9 +46,15 @@ One NVIDIA card, GeForce RTX 20 series or newer:
 
 | VRAM | What it gives | How it is known |
 | --- | --- | --- |
-| **4 GB: the minimum** | A short context, 16K to 48K, writing at 42 to 56 tok/s. 32K is the least a coding agent like OpenCode works with comfortably. | Measured on a simulated 4 GB card: the 6 GB card with 2 GiB held by another program ([how](docs/RESULTS.md#on-a-4-gb-gaming-card)) |
-| **6 GB: sensible** | **A 144K context** with the Q4 model, writing at 49 to 72 tok/s. | Measured: [the test laptop](docs/RESULTS.md#the-test-pc) |
-| **8 GB: optimal** | About 248K with Q4, and more of the experts in VRAM. | Setup's estimate less 10%; not measured with FastStrata |
+| **4 GB: the minimum** | A short context, 16K to 48K with an 8-bit cache, writing at 42 to 56 tok/s. 32K is the least a coding agent like OpenCode works with comfortably. | Measured on a simulated 4 GB card: the 6 GB card with 2 GiB held by another program ([how](docs/RESULTS.md#on-a-4-gb-gaming-card)) |
+| **6 GB: sensible** | **A 144K context** with the Q4 model and an 8-bit cache, writing at 49 to 72 tok/s. | Measured: [the test laptop](docs/RESULTS.md#the-test-pc) |
+| **8 GB: optimal** | About 248K with the Q4 model and an 8-bit cache (144K with a 16-bit one), and more of the experts in VRAM. | Setup's estimate less 10%; not measured with FastStrata |
+
+**Q4 and the 8-bit cache are two different things.** *Q4* (or *Q3*) is the **model file**: how many bits its weights
+take (UD-Q4_K_M 23 GB, UD-Q3_K_M 17 GB); it decides the RAM it wants and how exact it is. The **cache** is the
+**context's memory**, the attention cache that holds the conversation: in **8 bits** (`--kv-q8`) a token takes 11.7 KB
+instead of the 22 KB of 16 bits, which is what fits 144K on a 6 GB card. Setup picks the cache from the card: 16 bits
+where they fit, 8 where they do not, and 4 bits (`--kv-q4`, less exact) only where 8 do not fit either.
 
 | | |
 | --- | --- |
