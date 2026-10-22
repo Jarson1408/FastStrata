@@ -11,6 +11,11 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
   Windows lists for each graphics; Linux: /sys/class/drm; else nvidia-smi). Where it does, the safe context is 10%
   below the longest that fits (128K instead of 144K on a 6 GB card); the VRAM in use is no longer taken off the card.
 - Step 2's first choice is called the safe one.
+- The gateway needs Python 3.12 or newer: where the PC has none, setup now installs Python 3.12 for the user's
+  account on Windows (asked; winget, else python.org's installer, no administrator) and tells Linux the command,
+  where it used to leave the gateway out with a warning.
+- An NVIDIA driver older than 580 that still runs the CUDA 12 engine is told that setup compiles the engine because
+  of it, and how to update the driver.
 - The answer length: asked with the context where the models are chosen by hand (8K, 16K or 32K; the safe one is the
   preset's own, Qwen3.6 16K and Ornith 8K), or `--max-output N` / `MODEL=N`; at most a quarter of the context. Setup
   keeps it in the model's run config, and the gateway and OpenCode's `limit.output` take it from there.

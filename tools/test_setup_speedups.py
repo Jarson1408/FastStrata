@@ -446,7 +446,7 @@ class Install(unittest.TestCase):
             self.asked.append(prompt)
             return next((v for k, v in answers.items() if k in prompt), "")
 
-        found = [{"index": i, "name": n, "vram_gb": mib / 1024, "arch": arch, "driver": "617.42"}
+        found = [{"index": i, "name": n, "vram_gb": mib / 1024, "arch": arch, "driver": machine.get("driver", "617.42")}
                  for i, (n, mib, arch) in enumerate(machine.get("cards", []))]
         amd = [{"index": i, "name": n, "vram_gb": gb, "arch": arch, "driver": "amdgpu", "vendor": "amd"}
                for i, (n, gb, arch) in enumerate(machine.get("amd", []))]
@@ -688,6 +688,19 @@ class Install(unittest.TestCase):
             self.assertFalse(any(title in ln for ln in menu), title)
         self.assertEqual(cfg["model_name"], "qwen3.6-35b-a3b-ud-q4_k_m")
         self.assertEqual(self.built, [("cuda", ["89"])])
+
+    def test_a_driver_too_old_for_cuda_13_stops_with_how_to_update(self):
+        # a friend's PC (2026-10-22) had an old driver: setup says so in step 1, before anything is downloaded
+        code, out, cfg = self.install(dict(LAPTOP, driver="566.36"), ["--model", "UD-Q4_K_M", "--context", "147456"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("the NVIDIA driver is too old (566.36; 580 or newer is needed)", out)
+        self.assertIn("https://www.nvidia.com/drivers", out)
+
+    @unittest.skipUnless(setup.WIN, "the ready-made engine is for Windows")
+    def test_a_driver_for_cuda_12_only_is_told_it_compiles(self):
+        code, out, cfg = self.install(dict(LAPTOP, driver="566.36"),
+                                      ["--model", "UD-Q4_K_M", "--context", "147456", "--cuda", "12"])
+        self.assertIn("is older than 580: the ready-made engine needs 580 or newer, so setup compiles the engine", out)
 
     def test_a_pc_too_small_is_told_so(self):
         # 12 GB of RAM: no preset fits; --yes alone stops (the menu's pick is not the user's), --model with --yes goes on

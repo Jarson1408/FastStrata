@@ -55,10 +55,24 @@ One NVIDIA card, GeForce RTX 20 series or newer:
 | **RAM** | While it runs the engine holds 24-29 GB with the 23 GB model files and 19-22 GB with the 17 GB ones (measured on the 6 GB laptop, which has 64 GB). Setup checks what your PC has free. A PC with 32 GB was not measured. |
 | **Disk** | 17 to 24 GB for the model, on an SSD: the experts are read from the file. |
 | **Processor** | x86-64, with AVX2 for `--cpu-multi`; 8 cores were measured. |
-| **System** | Windows 10 / 11 or Linux, a current NVIDIA driver. An AMD card on Linux gets the CPU options only, not measured. No Mac. |
+| **System** | Windows 10 / 11 or Linux, a current NVIDIA driver. An AMD card: [see below](#amd-cards). No Mac. |
 
 Setup checks all of this itself and says what fits before it downloads anything: `START-HERE.bat --check` only
 reports. The full table by card and preset: [docs/RESULTS.md](docs/RESULTS.md#what-you-need).
+
+### AMD cards
+
+FastStrata's speedups are written for NVIDIA RTX cards (CUDA), and most of them do not run on an AMD card. With an AMD
+card, look at [PolyStrata](https://github.com/VecSzn/PolyStrata), the project FastStrata comes from. What FastStrata does on one:
+
+- **Windows:** Qwen3.6 and Ornith do not run: the engine for AMD cards (HIP) is built on Linux only. Setup says so
+  before it downloads anything.
+- **Linux with ROCm** (its development packages): setup compiles the engine, since the ready-made one in the release
+  is for NVIDIA. The speedups on the processor apply (`--threads`, `--cpu-multi`, `--suffix-drafts`, the conversation
+  cache); the ones on the card do not (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`).
+  The attention cache stays in 16 bits, 22 KB a token instead of 11.7, so the same VRAM holds about half the context.
+- **Not measured** on any AMD card. Moving the card's speedups to HIP, or a measurement from an AMD card, is welcome:
+  [docs/TEST_REQUESTS.md](docs/TEST_REQUESTS.md).
 
 ## Install in three steps
 

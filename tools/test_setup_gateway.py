@@ -256,6 +256,57 @@ class TestTheDesktopShortcut(unittest.TestCase):
         self.assertIn("access denied", said)
 
 
+class TestThePythonTheGatewayNeeds(unittest.TestCase):
+    """A friend's PC (2026-10-22) had Python older than 3.12 and no newer one: the gateway was left out with a
+    warning. Now Windows gets Python 3.12 for the user's account, asked, and Linux is told the command."""
+
+    def setUp(self):
+        self.gw = Path(tempfile.mkdtemp()) / "gateway"
+        self.gw.mkdir()
+
+    def _env(self, win, found, installed=None, answer="y", yes=False):
+        asked = []
+
+        def ask(q, choices, default, yes_):
+            asked.append(q)
+            return default if yes_ else answer
+
+        out = io.StringIO()
+        with mock.patch.object(setup, "WIN", win),              mock.patch.object(setup, "gateway_python", return_value=found),              mock.patch.object(setup, "install_gateway_python", return_value=installed) as inst,              mock.patch.object(setup, "ask", ask),              mock.patch.object(setup, "run", lambda *a, **k: None),              redirect_stdout(out):
+            py = setup.gateway_env(self.gw, yes)
+        return py, out.getvalue(), asked, inst.called
+
+    def test_a_new_enough_python_is_used_without_asking(self):
+        py, text, asked, installed = self._env(True, r"C:\Py313\python.exe")
+        self.assertIsNotNone(py)
+        self.assertEqual(asked, [])
+        self.assertFalse(installed)
+
+    def test_windows_without_one_installs_python_3_12_when_the_user_says_yes(self):
+        py, text, asked, installed = self._env(True, None, installed=r"C:\Py312\python.exe")
+        self.assertTrue(installed)
+        self.assertIsNotNone(py)
+        self.assertIn("Install Python 3.12 for your account", asked[0])
+        self.assertIn("Python for the gateway:", text)
+
+    def test_yes_installs_it_without_a_question(self):
+        py, text, asked, installed = self._env(True, None, installed=r"C:\Py312\python.exe", answer="n", yes=True)
+        self.assertTrue(installed)
+        self.assertIsNotNone(py)
+
+    def test_no_leaves_the_gateway_out_and_says_how_to_add_it(self):
+        py, text, asked, installed = self._env(True, None, answer="n")
+        self.assertIsNone(py)
+        self.assertFalse(installed)
+        self.assertIn("--gateway on", text)
+
+    def test_linux_is_told_the_command(self):
+        py, text, asked, installed = self._env(False, None)
+        self.assertIsNone(py)
+        self.assertEqual(asked, [])
+        self.assertIn("sudo apt install python3.12 python3.12-venv", text)
+
+
 class TestTheStep(unittest.TestCase):
     def setUp(self):
         # never the checkout's own gateway/ folder: an install made from this checkout would change what is asked

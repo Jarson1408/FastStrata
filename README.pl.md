@@ -55,10 +55,24 @@ Jedna karta NVIDIA, GeForce z serii RTX 20 lub nowsza:
 | **RAM** | Podczas pracy silnik zajmuje 24–29 GB z plikami modelu 23 GB i 19–22 GB z plikami 17 GB (zmierzone na laptopie 6 GB, który ma 64 GB). Setup sprawdza, ile Twój komputer ma wolnego. Komputera z 32 GB nie mierzono. |
 | **Dysk** | 17–24 GB na model, na SSD: eksperci są czytani z pliku. |
 | **Procesor** | x86-64, z AVX2 dla `--cpu-multi`; mierzono na 8 rdzeniach. |
-| **System** | Windows 10 / 11 lub Linux, aktualny sterownik NVIDIA. Karta AMD na Linuksie dostaje tylko opcje procesora, niezmierzone. Nie działa na Macu. |
+| **System** | Windows 10 / 11 lub Linux, aktualny sterownik NVIDIA. Karta AMD: [zobacz niżej](#karty-amd). Nie działa na Macu. |
 
 Setup sam to wszystko sprawdza i mówi, co się mieści, zanim cokolwiek pobierze: `START-HERE.bat --check` tylko
 pokazuje wynik. Pełna tabela według karty i presetu: [docs/RESULTS.pl.md](docs/RESULTS.pl.md#czego-potrzebujesz).
+
+### Karty AMD
+
+Przyspieszenia FastStrata są napisane dla kart NVIDIA RTX (CUDA) i większość z nich nie działa na karcie AMD. Z kartą
+AMD zajrzyj do [PolyStrata](https://github.com/VecSzn/PolyStrata), projektu, z którego wywodzi się FastStrata. Co FastStrata robi na takiej karcie:
+
+- **Windows:** Qwen3.6 i Ornith nie działają: silnik dla kart AMD (HIP) buduje się tylko na Linuksie. Setup mówi to,
+  zanim cokolwiek pobierze.
+- **Linux z ROCm** (z jego pakietami deweloperskimi): setup kompiluje silnik, bo gotowy silnik z wydania jest dla
+  NVIDIA. Działają przyspieszenia po stronie procesora (`--threads`, `--cpu-multi`, `--suffix-drafts`, pamięć rozmów),
+  nie działają te na karcie (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`). Pamięć
+  uwagi zostaje 16-bitowa, 22 KB na token zamiast 11,7, więc ta sama ilość VRAM mieści mniej więcej połowę kontekstu.
+- **Niezmierzone** na żadnej karcie AMD. Przeniesienie przyspieszeń karty na HIP albo pomiar z karty AMD są mile
+  widziane: [docs/TEST_REQUESTS.md](docs/TEST_REQUESTS.md).
 
 ## Instalacja w trzech krokach
 

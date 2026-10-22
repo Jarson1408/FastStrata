@@ -145,7 +145,7 @@ class Machine:
             # the gateway: its folder in this FastStrata folder, its settings in the temporary folder, OpenCode found
             mock.patch.object(setup, "GATEWAY_DIR", self.t / "gateway"),
             mock.patch.object(setup, "fetch_gateway", fake_gateway),
-            mock.patch.object(setup, "gateway_env", lambda gw: Path("py")),
+            mock.patch.object(setup, "gateway_env", lambda gw, yes=False: Path("py")),
             mock.patch.object(setup, "gateway_settings_path", lambda: self.settings),
             mock.patch.object(setup, "find_opencode", lambda: "opencode"),
             mock.patch.object(setup, "out", lambda cmd: "1.0" if cmd[:1] == ["opencode"] else real_out(cmd)),

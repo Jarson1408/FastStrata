@@ -61,6 +61,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.error
@@ -7508,7 +7509,41 @@ def gateway_python() -> str | None:
         exe = out(cmd).strip()
         if exe and Path(exe).is_file():
             return exe
+    if WIN:                                            # installed a moment ago: not on this process's PATH yet
+        for m in (14, 13, 12):
+            exe = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / f"Python3{m}" / "python.exe"
+            if os.environ.get("LOCALAPPDATA") and exe.is_file():
+                return str(exe)
     return None
+
+
+GATEWAY_PYTHON_INSTALLER = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
+
+
+def install_gateway_python() -> str | None:
+    """Windows: Python 3.12 for this user account (no administrator), the way START-HERE.bat installs one for setup:
+    winget, else python.org's installer, quietly; the new Python, or None.  Elsewhere None: the system's package
+    manager installs Python (gateway_env() says how)."""
+    if not WIN:
+        return None
+    if shutil.which("winget"):
+        say("  installing Python 3.12 for your account with winget ...")
+        run(["winget", "install", "-e", "--id", "Python.Python.3.12", "--scope", "user", "--silent", "--source",
+             "winget", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
+            check=False, quiet=True)
+        found = gateway_python()
+        if found:
+            return found
+    exe = Path(tempfile.gettempdir()) / "faststrata-python-3.12-setup.exe"
+    try:
+        download(GATEWAY_PYTHON_INSTALLER, exe, "Python 3.12 installer")
+    except (OSError, SystemExit) as e:
+        warn(f"the Python installer could not be downloaded ({e})")
+        return None
+    say("  installing Python 3.12 for your account ...")
+    run([exe, "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1", "Include_test=0"],
+        check=False, quiet=True)
+    return gateway_python()
 
 
 def venv_python(folder: Path, windowless: bool = False) -> Path:
@@ -7516,19 +7551,30 @@ def venv_python(folder: Path, windowless: bool = False) -> Path:
         ("pythonw.exe" if windowless else "python.exe") if WIN else "python")
 
 
-def gateway_env(gw: Path) -> Path | None:
+def gateway_env(gw: Path, yes: bool = False) -> Path | None:
     """The gateway's own Python environment with its packages (`pip install -e .[gui]`: FastAPI, uvicorn, httpx,
-    json-repair, PySide6); the environment's python, or None (said why) when there is no new enough Python."""
+    json-repair, PySide6); the environment's python, or None (said why) when there is no new enough Python.  Where
+    the PC has none, Windows gets Python 3.12 for the user's account (asked; --yes installs it), and Linux the command
+    that installs one."""
     py = venv_python(gw)
     if py.is_file() and done(gw / ".venv" / "packages"):
         ok("the gateway's Python environment is ready")
         return py
     base = gateway_python()
+    want = f"{GATEWAY_PYTHON[0]}.{GATEWAY_PYTHON[1]}"
+    have = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    if base is None and WIN:
+        say(f"  The gateway needs Python {want} or newer; setup runs on Python {have} and this PC has none newer.")
+        if ask(f"Install Python {want} for your account (no administrator, about 25 MB)?", ["y", "n"], "y", yes) == "y":
+            base = install_gateway_python()
     if base is None:
-        warn(f"the gateway needs Python {GATEWAY_PYTHON[0]}.{GATEWAY_PYTHON[1]} or newer, and this PC has none: "
-             "install it from python.org (\"Add python.exe to PATH\"), then run "
-             f"{'START-HERE.bat' if WIN else './setup.sh'} --gateway on")
+        warn(f"the gateway needs Python {want} or newer, and this PC has none: " +
+             ("install it from python.org (\"Add python.exe to PATH\")" if WIN else
+              f"install python{want} with your system's package manager (e.g. sudo apt install python{want} "
+              f"python{want}-venv)") +
+             f", then run {'START-HERE.bat' if WIN else './setup.sh'} --gateway on")
         return None
+    ok(f"Python for the gateway: {base}")
     if not py.is_file():
         run([base, "-m", "venv", str(gw / ".venv")], quiet=True)
     say("  installing the gateway's packages (about 300 MB, PySide6 is most of it) ...")
@@ -7720,7 +7766,7 @@ def faststrata_gateway(a, current: Path | None = None) -> Path | None:
     if not (gw / "gateway" / "app.py").is_file():
         warn(f"{gw} holds no gateway (no gateway/app.py); nothing was set up for it")
         return None
-    py = gateway_env(gw)
+    py = gateway_env(gw, a.yes or a.gateway == "on")
     if py is None:
         return None
     current = current if current is not None and current in configs else configs[0]
@@ -8725,6 +8771,12 @@ def main() -> int:
                  "update it with the NVIDIA App or from https://www.nvidia.com/drivers, restart, and run this again" +
                  ("" if cuda_tk == 12 else f" (or --cuda 12: the experimental CUDA 12 engine runs with driver "
                                            f"{CUDA12_MIN_DRIVER} or newer, docs/OLDER_GPUS.md)"))
+        if WIN and driver_major(gpu) < MIN_DRIVER and FAMILIES.get(fam0, {}).get("engine") == "poly":
+            # FASTSTRATA: the ready-made engine (CUDA 13) wants 580; an older driver means compiling it here
+            warn(f"the NVIDIA driver {gpu['driver']} is older than {MIN_DRIVER}: the ready-made engine needs "
+                 f"{MIN_DRIVER} or newer, so setup compiles the engine on this PC (Visual Studio's compiler and the "
+                 "CUDA toolkit, a few GB). Updating the driver (the NVIDIA App or https://www.nvidia.com/drivers), "
+                 "restarting and running this again avoids that")
     if fam0 in FASTSTRATA_FAMILIES and not gpu.get("uma"):  # FastStrata was made for small cards and measured on them
         if gpu["vram_gb"] < 3.5:
             warn(f"{gpu['vram_gb']:.1f} GB of VRAM: FastStrata was measured on 6 GB and on a simulated 4 GB card; on "
