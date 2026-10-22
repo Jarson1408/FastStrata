@@ -736,7 +736,7 @@ POLY_SPEEDUPS = ("on", "off")
 FASTSTRATA_FAMILIES = ("qwen36", "ornith")
 # FastStrata's release: CHANGELOG.md has a section for it, release/make_faststrata_release.py tags the public tree
 # v<this>; on the screen and in the log, so a report says which one it is
-FASTSTRATA_VERSION = "0.1.0"
+FASTSTRATA_VERSION = "0.1.1"
 STRATA_URL = "https://github.com/Niko1221/Strata"
 POLY_SUFFIX_MIB = 256            # --suffix-drafts: an index of 4.2M tokens in 160 MiB of RAM (step 7)
 POLY_ELASTIC_FROM = 1024         # --elastic-prefill: a prompt of this many tokens or more is read wider (step 5)

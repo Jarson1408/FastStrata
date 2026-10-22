@@ -5,8 +5,14 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
-## Unreleased
+## v0.1.1 - 2026-10-22
 
+Setup and the gateway, from the first installs on other PCs. The engine is the same as in v0.1.0: this release
+carries the same ready-made `strata-poly-windows-x64-3ba1bf3a4bf413eb.zip`.
+
+- The gateway, release `47f4cd8`: a read of a file the gateway spilled reaches the model whole. Before, an 8 KB file
+  was replaced by a preview, the spill file the preview pointed to was replaced by the same preview, and the model
+  read it again until the loop breaker stopped it, never having seen the file.
 - Setup asks whether the NVIDIA card shows the desktop, with what it found as the answer (Windows: the screens
   Windows lists for each graphics; Linux: /sys/class/drm; else nvidia-smi). Where it does, the safe context is 10%
   below the longest that fits (128K instead of 144K on a 6 GB card); the VRAM in use is no longer taken off the card.
@@ -19,6 +25,9 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 - The answer length: asked with the context where the models are chosen by hand (8K, 16K or 32K; the safe one is the
   preset's own, Qwen3.6 16K and Ornith 8K), or `--max-output N` / `MODEL=N`; at most a quarter of the context. Setup
   keeps it in the model's run config, and the gateway and OpenCode's `limit.output` take it from there.
+- Setup's tests pass on Linux too (the CI's Ubuntu job): three upstream tests took Windows for granted.
+- README: the gateway for OpenCode up front; a section on AMD cards (FastStrata's speedups are for NVIDIA RTX;
+  with an AMD card, upstream PolyStrata).
 
 ## v0.1.0 - 2026-10-21
 
