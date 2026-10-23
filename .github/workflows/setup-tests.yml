@@ -23,7 +23,7 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"   # what START-HERE.bat installs where a PC has no Python
       - name: Setup's tests
