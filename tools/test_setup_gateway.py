@@ -9,9 +9,11 @@ are stand-ins.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -305,6 +307,54 @@ class TestThePythonTheGatewayNeeds(unittest.TestCase):
         self.assertIsNone(py)
         self.assertEqual(asked, [])
         self.assertIn("sudo apt install python3.12 python3.12-venv", text)
+
+
+class TestThePythonInstallerIsChecked(unittest.TestCase):
+    """python.org's installer runs only with the pinned SHA-256 (audit S-2026-01): a file changed on the way is
+    deleted and never run.  START-HERE.bat downloads the same file and checks the same sum."""
+
+    def _install(self, content: bytes, sha=None):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        ran = []
+
+        def download(url, dst, what=None):
+            dst.write_bytes(content)
+            dst.with_name(dst.name + ".done").write_text("done", encoding="utf-8")
+
+        out = io.StringIO()
+        with mock.patch.object(setup, "WIN", True), \
+             mock.patch.object(setup.shutil, "which", return_value=None), \
+             mock.patch.object(setup.tempfile, "gettempdir", return_value=str(tmp)), \
+             mock.patch.object(setup, "download", download), \
+             mock.patch.object(setup, "run", lambda cmd, **k: ran.append(cmd)), \
+             mock.patch.object(setup, "gateway_python", return_value=None), \
+             mock.patch.object(setup, "GATEWAY_PYTHON_SHA256", sha or setup.GATEWAY_PYTHON_SHA256), \
+             redirect_stdout(out):
+            setup.install_gateway_python()
+        return ran, list(tmp.iterdir()), out.getvalue()
+
+    def test_a_wrong_file_is_deleted_and_not_run(self):
+        ran, left, said = self._install(b"MZ not python.org's installer")
+        self.assertEqual(ran, [])
+        self.assertEqual(left, [])                                  # the file and its finish mark: downloaded again
+        self.assertIn("wrong SHA-256", said)
+
+    def test_the_right_file_runs(self):
+        content = b"MZ the installer"
+        ran, _, said = self._install(content, sha=hashlib.sha256(content).hexdigest())
+        self.assertEqual(len(ran), 1)
+        self.assertIn("/quiet", ran[0])
+        self.assertNotIn("wrong SHA-256", said)
+
+    def test_start_here_checks_the_same_file_and_sum(self):
+        bat = (ROOT / "START-HERE.bat").read_text(encoding="utf-8")
+        self.assertIn(setup.GATEWAY_PYTHON_INSTALLER, bat)
+        self.assertIn(setup.GATEWAY_PYTHON_SHA256.upper(), bat)
+        self.assertRegex(setup.GATEWAY_PYTHON_SHA256, r"^[0-9a-f]{64}$")
+        # the check comes between the download and the run
+        self.assertLess(bat.index("Invoke-WebRequest"), bat.index("Get-FileHash"))
+        self.assertLess(bat.index("Get-FileHash"), bat.index('"%TEMP%\\strata-python-setup.exe" /quiet'))
 
 
 class TestTheStep(unittest.TestCase):

@@ -978,8 +978,8 @@ print(r.choices[0].message.content)
   `strata-<model>.json` or `STRATA_ALLOWED_HOSTS=strata.example.com` (comma-separated); `".example.com"` allows that
   name and every name below it, and `["*"]` turns the check off (so does setting `api_key`). The hosts of
   `trusted_origins` count as allowed. Requests without a `Host` header (HTTP/1.0 clients) pass.
-- **Web pages without an API key.** Without `api_key`, a `POST` to `/v1/*` that carries an `Origin` header (a
-  browser page sent it) is answered only for PolyStrata's own page, pages on `localhost` or an allowed host name (any
+- **Web pages without an API key.** Without `api_key`, a `POST` to `/v1/*`, `/completion` or `/tokenize` that
+  carries an `Origin` header (a browser page sent it) is answered only for PolyStrata's own page, pages on `localhost` or an allowed host name (any
   port), the origins in `trusted_origins` or `cors_origins`, and browser extensions and desktop apps
   (`chrome-extension://`, `moz-extension://`, `app://`: no web site can send those), and only with a JSON body; any
   other page, and `Origin: null`, gets **403**. Clients that send no `Origin` (curl, the OpenAI and Anthropic SDKs,
@@ -987,6 +987,8 @@ print(r.choices[0].message.content)
   an API key, the key decides. `POST /unload` and `POST /load` take `Content-Type: application/json` from PolyStrata's
   own page (or no `Origin`), like `/settings`. `POST /slots/0?action=save|restore` keeps the Host and API-key checks
   and also takes only JSON from no `Origin`, PolyStrata's own page or a trusted origin - also when an API key is set.
+  The web app's pages (`/`, `/api-monitor`) come with `X-Frame-Options: DENY` and `Content-Security-Policy:
+  frame-ancestors 'none'`: no other site can show them in a frame and have them clicked there.
 
 **Conversation cache.** A request that continues a chat reads only the part after what the engine already holds: the
 live session, or one of the checkpoints it keeps in RAM (up to 6, ~118 MB each, taken at the start of each new

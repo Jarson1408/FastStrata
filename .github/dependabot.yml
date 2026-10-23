@@ -1,0 +1,17 @@
+# Dependabot: a monthly look at the Python packages requirements.txt pins (#214) and the CI's actions. Pinned versions
+# never update themselves, so a fixed vulnerability would stay on every install until someone changes the file: an
+# update comes as one pull request a month (the CI runs setup's and the server's tests on it), never merged by itself.
+# Security alerts and security updates between those are the repository's settings (Settings, Code security).
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      python-packages:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

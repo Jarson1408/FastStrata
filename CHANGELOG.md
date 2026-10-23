@@ -5,10 +5,24 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
-## Unreleased
+## v0.2.0 - 2026-10-23
+
+The fixes from two independent code audits of v0.1.1 (the server's routes for the gateway, the check of Python's
+installer, the tests the CI runs), and the context's cache named apart from the model's Q4 / Q3. The engine is the
+same as in v0.1.0 and v0.1.1: this release carries the same ready-made
+`strata-poly-windows-x64-3ba1bf3a4bf413eb.zip`.
 
 - The context's memory (the attention cache) is named apart from the model's Q4 / Q3: setup's menu says "up to 144K
   context with an 8-bit cache", the context question says what the cache is, and the README explains the two.
+- The server's `/completion` and `/tokenize` (what the gateway sends) refuse a web page of another site without an
+  API key, as `/v1/*` does: before, any site open in the browser could have the model write on the PC's card.
+- An engine error in the middle of a streamed `/completion` reaches the gateway as an error event and `[DONE]`, no
+  longer as a second HTTP response written into the stream; the API monitor shows `/completion`'s answer and speed.
+- The web app's pages cannot be shown in another site's frame (`X-Frame-Options`, `frame-ancestors`).
+- Where setup downloads python.org's Python 3.12 installer (no Python and no winget), it runs it only with the
+  pinned SHA-256; START-HERE.bat checks the same.
+- The CI runs the server's tests too (every `serve/test_*.py` against the mock engine), and Dependabot looks at the
+  pinned packages once a month.
 
 ## v0.1.1 - 2026-10-22
 

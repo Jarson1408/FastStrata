@@ -736,7 +736,7 @@ POLY_SPEEDUPS = ("on", "off")
 FASTSTRATA_FAMILIES = ("qwen36", "ornith")
 # FastStrata's release: CHANGELOG.md has a section for it, release/make_faststrata_release.py tags the public tree
 # v<this>; on the screen and in the log, so a report says which one it is
-FASTSTRATA_VERSION = "0.1.1"
+FASTSTRATA_VERSION = "0.2.0"
 STRATA_URL = "https://github.com/Niko1221/Strata"
 POLY_SUFFIX_MIB = 256            # --suffix-drafts: an index of 4.2M tokens in 160 MiB of RAM (step 7)
 POLY_ELASTIC_FROM = 1024         # --elastic-prefill: a prompt of this many tokens or more is read wider (step 5)
@@ -7527,6 +7527,10 @@ def gateway_python() -> str | None:
 
 
 GATEWAY_PYTHON_INSTALLER = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
+# its SHA-256, checked before it runs (START-HERE.bat has the same).  python.org lists only MD5 for 3.12.10, so this is
+# the one winget's manifest pins for that address (winget show --id Python.Python.3.12 --version 3.12.10); another
+# version in the address needs its own
+GATEWAY_PYTHON_SHA256 = "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb"
 
 
 def install_gateway_python() -> str | None:
@@ -7548,6 +7552,16 @@ def install_gateway_python() -> str | None:
         download(GATEWAY_PYTHON_INSTALLER, exe, "Python 3.12 installer")
     except (OSError, SystemExit) as e:
         warn(f"the Python installer could not be downloaded ({e})")
+        return None
+    h = hashlib.sha256()
+    with open(exe, "rb") as f:
+        for b in iter(lambda: f.read(16 << 20), b""):
+            h.update(b)
+    if h.hexdigest() != GATEWAY_PYTHON_SHA256:      # changed on the way or on the server: never run it
+        exe.unlink(missing_ok=True)                  # (and the next run downloads it again)
+        exe.with_name(exe.name + ".done").unlink(missing_ok=True)
+        warn(f"the Python installer has the wrong SHA-256 ({h.hexdigest()}, expected {GATEWAY_PYTHON_SHA256}): "
+             f"deleted, not run")
         return None
     say("  installing Python 3.12 for your account ...")
     run([exe, "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1", "Include_test=0"],

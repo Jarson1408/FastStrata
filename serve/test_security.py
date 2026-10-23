@@ -223,6 +223,21 @@ class OverHttp(unittest.TestCase):
         self.assertEqual(self.req("POST", "/v1/chat/completions", self.chat_body(),
                                   {"Content-Type": "text/plain", "Origin": f"http://127.0.0.1:{self.port}"})[0], 415)
 
+    def test_pages_cannot_be_framed(self):
+        # another site's page could show the app in a frame and have the user click Unload or Settings in it
+        self.start(api_monitor=True)
+        for path in ("/", "/api-monitor"):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+            try:
+                c.request("GET", path)
+                r = c.getresponse()
+                r.read()
+                self.assertEqual(r.status, 200, path)
+                self.assertEqual(r.getheader("X-Frame-Options"), "DENY", path)
+                self.assertEqual(r.getheader("Content-Security-Policy"), "frame-ancestors 'none'", path)
+            finally:
+                c.close()
+
     def test_configured_origins_pass(self):
         self.start(cors_origins=["https://chat.example.com"], trusted_origins=["https://strata.example.com"],
                    allowed_hosts=["webui.lan"])

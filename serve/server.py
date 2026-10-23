@@ -4,7 +4,8 @@
     python -m serve.server --engine strata --config strata.json --port 8080   (the real engine, resident)
 
 Endpoints: POST /v1/chat/completions (OpenAI, stream and non-stream), POST /v1/messages (Anthropic, stream and
-non-stream), GET /v1/models, GET /models, GET /props, GET /slots, GET /health, GET /mcp. One sequence at a time behind a FIFO (plan: one resident sequence).
+non-stream), POST /completion and /tokenize (llama.cpp's format, which the FastStrata Gateway sends; also under /v1),
+GET /v1/models, GET /models, GET /props, GET /slots, GET /health, GET /mcp. One sequence at a time behind a FIFO (plan: one resident sequence).
 Image generation (optional, when the config has an "images" section): POST /v1/images/generations (OpenAI's shape,
 plus seed and steps) runs stable-diffusion.cpp's sd-cli for Qwen-Image-2.1-Turbo, one job at a time on the GPU the
 text engine uses (serve/images.py).
@@ -5391,9 +5392,10 @@ def make_handler(svc: Service):
             return False
 
         def _foreign_page(self) -> bool:
-            """Without an API key, a /v1 POST from a browser page of another site (any site can POST text/plain
-            there without a CORS preflight) would burn GPU time: an Origin header must name an allowed page, and
-            then the body must be JSON.  No Origin (curl, the SDKs, other servers): any content type, as before."""
+            """Without an API key, a /v1 POST (or /completion, /tokenize) from a browser page of another site (any
+            site can POST text/plain there without a CORS preflight) would burn GPU time: an Origin header must name
+            an allowed page, and then the body must be JSON.  No Origin (curl, the SDKs, other servers): any content
+            type, as before."""
             origin = self.headers.get("Origin")
             if svc.api_key or not origin:
                 return False
@@ -5592,6 +5594,9 @@ def make_handler(svc: Service):
                 body = (ROOT / "serve" / "web" / ("monitor.html" if path else "index.html")).read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                # no other site may show these pages in a frame and have the user click Unload or Settings in them
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -5691,7 +5696,8 @@ def make_handler(svc: Service):
             if not self._authorized():
                 return
             path = self.path.split("?")[0].rstrip("/")   # issue #55: Claude Code posts /v1/messages?beta=true
-            if path.startswith("/v1/") and self._foreign_page():
+            # /completion and /tokenize (llama.cpp's names, the Gateway's) run the model as /v1/* does: the same check
+            if (path.startswith("/v1/") or path in ("/completion", "/tokenize")) and self._foreign_page():
                 return
             if path == "/settings":
                 self._settings()
@@ -6105,6 +6111,10 @@ def make_handler(svc: Service):
                             content = item["delta"] if kind == "response.output_text.delta" else ""
                             reasoning = item["delta"] if kind == "response.reasoning_text.delta" else ""
                             usage, timings = (item.get("response") or {}).get("usage"), None
+                        elif api == "completion":            # Service.run's own items (/completion)
+                            kind, x = item
+                            content, reasoning = x.text if kind == "event" else "", ""
+                            usage, timings = None, x.get("timings") if kind == "done" else None
                         else:
                             _, event = item
                             delta = event.get("delta", {})
@@ -6231,11 +6241,17 @@ def make_handler(svc: Service):
             cancel = threading.Event()
             self._watch_client(cancel)
             stream = bool(req.get("stream"))
+            items = self._capture(svc.run(ids, False, None, max_new, req, cancel), "completion")   # monitor: _capture
+
+            def usage(x):                                # the monitor's token counts (nothing kept when it is off)
+                n = x.get("completion_tokens", 0)
+                self._note(usage={"prompt_tokens": len(ids), "completion_tokens": n, "total_tokens": len(ids) + n})
+
             if not stream:
                 parts = []
                 finish = "stop"
                 completion_tokens = 0
-                for kind, x in svc.run(ids, False, None, max_new, req, cancel):
+                for kind, x in items:
                     if kind == "event":
                         ev = x
                         if ev.text:
@@ -6243,6 +6259,7 @@ def make_handler(svc: Service):
                     elif kind == "done":
                         finish = x.get("finish", "stop")
                         completion_tokens = x.get("completion_tokens", 0)
+                        usage(x)
                 full_text = "".join(parts)
                 return self._json(200, {
                     "content": full_text,
@@ -6253,7 +6270,7 @@ def make_handler(svc: Service):
                 })
             self._sse()
             try:
-                for kind, x in svc.run(ids, False, None, max_new, req, cancel):
+                for kind, x in items:
                     if kind == "ping":
                         self.wfile.write(b": keep-alive\n\n")
                         self.wfile.flush()
@@ -6271,6 +6288,7 @@ def make_handler(svc: Service):
                             "tokens_predicted": x.get("completion_tokens", 0),
                             "tokens_evaluated": len(ids),
                         }
+                        usage(x)
                         self.wfile.write(b"data: " + json.dumps(chunk, ensure_ascii=False).encode() + b"\n\n")
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
@@ -6280,6 +6298,14 @@ def make_handler(svc: Service):
             except EngineDied as e:
                 err = {"error": {"type": "server_error", "message": f"{e}; the next request restarts it"}}
                 self._note(error=err["error"])
+                self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
+            except (ValueError, GpuBusy, EngineStarting, EngineStuck) as e:
+                # the engine's ERR or non-finite logits (#879, a ValueError), or a turn refused after the headers went
+                # out: an error event and [DONE], as llama.cpp ends a failed stream - not a second HTTP response inside
+                # this one, and no "stop": true that would pass the cut answer off as a whole one
+                err = {"error": {"type": "server_error", "message": str(e)}}
+                self._note(error=err["error"])
+                print(f"[strata] /completion ended with an error after its stream began: {e}", flush=True)
                 self.wfile.write(b"data: " + json.dumps(err).encode() + b"\n\ndata: [DONE]\n\n")
 
         def _responses_ready(self, req, events):
@@ -7347,6 +7373,7 @@ def main() -> int:
     svc.start_vision_idle()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
+          f"llama.cpp: /completion, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"
           f"{', API key required' if svc.api_key else ''})", flush=True)
     print(f"       open http://{here}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)

@@ -1,6 +1,7 @@
 # Setup's own tests (tools/run_setup_tests.py: every tools/test_setup_*.py and tools/test_faststrata_names.py) on
 # Windows and Linux. They need no GPU and download nothing: the card, the network and the user's folders are stand-ins.
-# The engine is not built here.
+# Then the server's tests (tools/run_setup_tests.py --server: every serve/test_*.py against the mock engine), once
+# requirements.txt's packages are installed. The engine is not built here.
 name: setup tests
 
 on:
@@ -27,3 +28,7 @@ jobs:
           python-version: "3.12"   # what START-HERE.bat installs where a PC has no Python
       - name: Setup's tests
         run: python tools/run_setup_tests.py
+      - name: The server's packages (requirements.txt)
+        run: python -m pip install -r requirements.txt
+      - name: The server's tests
+        run: python tools/run_setup_tests.py --server
