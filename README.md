@@ -238,7 +238,7 @@ FastStrata is the third project in a line. [Strata](https://github.com/Niko1221/
 runs Qwen3.8-Flash-Next with its experts split between the card and the CPU, and brought the installer, the server and
 the web app. [PolyStrata](https://github.com/VecSzn/PolyStrata) (VecSzn) added `strata-poly`, an engine that reads a
 model's GGUF file in place, for Qwen3.6-35B-A3B, Ornith 1.5 and others. FastStrata narrows it to the two models that
-fit a gaming PC, four presets in all, and makes `strata-poly` fast on a small card: ten measured steps, nine changes
+fit a gaming PC, four presets in all, and makes `strata-poly` fast on a small card: eleven measured steps, ten changes
 to the engine and its settings ([each one](docs/RESULTS.md#what-faststrata-changed)).
 
 For Qwen3.8-Flash-Next use [Strata](https://github.com/Niko1221/Strata). Plans: expert profiles shipped with each

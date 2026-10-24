@@ -1243,6 +1243,112 @@ benchmark (HumanEval, a tool call's success) for what the smaller files cost, th
 long-context yardstick for them; Ornith with a tail skip; the server and the Gateway (the engine on its own); why one
 run with `--graph-experts` stopped on the 4 GB card; Linux, HIP and SYCL.
 
+## 11. A checkpoint where the prompt's last message begins: `--prompt-cache-message` (2026-10-21, branch `poly/resume-last-message`; measured by the session that wrote it)
+
+**What was seen.** The user's install (`C:\tools\FastStrata`, the release's engine, the daily config of step 10, the
+FastStrata Gateway in front of OpenCode) with the Gateway's LODESTAR on, one OpenCode session of 43K to 71K tokens,
+2026-10-21 21:16 to 21:27. The engine's log says where each prompt was taken up (the tokens a read took, against the
+prompt's length): at 38,912 for five prompts of 45.9K to 48.5K tokens (7,010 to 9,616 tokens read), and for the next
+one of 59,356 (20,443 read, about 30 s by the server's log); then at 53,248 for seven prompts of 60.0K to 70.8K (6,713
+to 17,521 read; 70,770 tokens: 17,521 read in about 31 s). Each prompt was only 500 to 11,000 tokens longer than the one
+before.
+
+**Why.** The Gateway with LODESTAR ends every prompt with a system message of its own (`=== LODESTAR TURN ===`,
+3,000 to 3,900 characters here, 480 to 730 tokens) before the reply's turn, and OpenCode does not keep it: the next
+prompt holds the reply and the tools' answer where that frame was. So each prompt parts from the one before at the
+frame's first token. Qwen3.6's DeltaNet layers can only go back to a checkpoint. A read leaves one every 2,048 tokens
+(`--prompt-cache-every`), one where the reply's turn begins (the server's `turn_at`, the last `<|im_start|>`) and one
+before the last token; six are kept (`--prompt-cache`), and of more the one goes whose neighbours are closest
+together, the last two staying. Those two are both past the frame. The ones every 2,048 tokens inside a short read
+have neighbours 4,096 tokens apart, closer than the old ones far back, so they went first, every turn. After each of
+those prompts the six were 8,192, 16,384, 28,672, 38,912, the turn and the end; after the 59K prompt's read of
+20,443 tokens 53,248 got in, and stayed the newest one before the frame for the seven prompts after it. Shown by
+sending the session's 15 prompts (the Gateway's dumps, tokenized as the server does) through `Conversations` with
+the daily cache options and an engine that is a hash of the tokens (`src/poly/resume_replay.cpp`,
+`test_scripts/resume_bench.py replay`): it gives 38,912 and 53,248 for the same prompts, and the reads in the log
+within one token (the server's prompt had two tokens more than the dump).
+
+The suspects that were not it: parking keeps a conversation's checkpoints (it cuts the rows at the last one, the end
+of the prompt, and the replay parks as the engine does); `--elastic-prefill` reads past checkpoints in one go and the
+engine writes each one kept (`Conversations::inside()`), as the replay does without it. The number kept is part of
+it, at about 150 MB of RAM a checkpoint: in the replay, 6 kept read 8,902 tokens a turn again, 12 kept 5,121 and 24
+kept 2,128.
+
+**The change.** With **`--prompt-cache-message N`** the engine also takes a checkpoint where the prompt's last message
+begins: the token that opens the reply's turn, the time before (`<|im_start|>` of the frame), when it is N tokens or
+fewer back, as the other engine's opt-in `STRATA_CACHE_MESSAGE_BOUNDARY` finds it. The drop rule keeps it with the
+last two until the next prompt, so a read keeps three of the six at its end. Default 0: no such checkpoint, and every
+path as before (`conversations_test` as before, plus a test of the frame case that fails without the drop rule's
+change; the replay without the flag gives the old build's places for every one of the 61 prompts).
+
+**The replay** (`Conversations` alone, as above; the first two prompts of each session are read whole by both):
+
+| Session, prompts after the first two | | Old | `--prompt-cache-message 2048` |
+| --- | --- | ---: | ---: |
+| LODESTAR on, 13 prompts of 45.9K to 70.8K | tokens read a turn | 11,541 | **2,640** |
+| | of them before where the prompt parts from the one before | 8,902 | **1** (the frame's `<|im_start|>`) |
+| | all 15 prompts, tokens read | 236,627 | 120,913 |
+| LODESTAR off, 44 prompts of 14.1K to 51.1K (same day, 20:11 to 21:12) | tokens read a turn | 2,379 | 2,132 |
+| | of them before where the prompt parts from the one before | 562 | 316 |
+
+With LODESTAR on every prompt from the third is taken up at the frame of the one before (42,914, 45,414, ... 69,415).
+With it off most prompts go on from the end of the one before and take nothing from the change; four prompts that go
+back to an earlier conversation or an earlier point of one were taken up later (11,910 -> 9,491 tokens read, 9,713 ->
+6,034, 5,019 -> 2,639, 7,412 -> 5,032), and none earlier. N = 1,024 gave the same as 2,048 on both sessions; N = 4,096
+read more on the second (117,394 tokens): a 3,500-token tool answer got the checkpoint and pushed out an older one a
+later prompt went back to. The Gateway caps the frame's active-context part at 4,096 characters, so a frame stays
+under about 2,000 tokens: 2,048 is the value to use.
+
+What the prompts that still part earlier are: at a new user message the template drops the thinking of every reply
+since the user's message before, so the prompt parts at the first reply after it (the 562 and 316 tokens a turn
+above). Not changed here.
+
+**On the engine.** `test_scripts/resume_bench.py run`: the session's prompts in order to one engine, `--serve`, the
+user's daily flags (`--max-context 147456 --conversation-cache-mib 12288 --conversation-cache-slots 8 --tail-skip 6
+--threads 8 --kv-q8 --prompt-batch 512 --attn-split --graph-experts --elastic-prefill 1024 --suffix-drafts 256
+--cpu-multi`), `turn_at` as the server sends it, greedy, 16 tokens an answer (the next prompt holds the answer the
+Gateway saw, not this one). Old: kv-q8 at 5da69afe; new: this branch with `--prompt-cache-message 2048`; both built
+here for sm_86; old, new, old, new; 2026-10-21 22:03 to 22:39, nothing else on the card.
+
+| Session, prompts after the first two | | Old, run 1 / 2 | New, run 1 / 2 |
+| --- | --- | ---: | ---: |
+| LODESTAR on, 13 prompts of 45.9K to 70.8K | tokens read a turn | 11,541 / 11,541 | **2,640** / 2,640 |
+| | prompt's time a turn | 19.4 / 19.0 s | **7.7 / 7.7 s** |
+| | all 15 prompts (the first two read whole, 86 s, by both) | 338 / 333 s | **186 / 186 s** |
+| LODESTAR off, 44 prompts of 14.1K to 51.1K | tokens read a turn | 2,378 / 2,378 | 2,130 / 2,131 |
+| | prompt's time a turn | 4.9 / 4.9 s | 4.9 / 4.9 s |
+| | all 46 prompts | 230 / 230 s | 229 / 229 s |
+
+The engine read what the replay said, to the token, in every run. With LODESTAR on a turn's prompt took 7.7 s where
+19.2: the 70.8K prompt 6.9 s where 30.8 (1,353 tokens read where 17,520), the 66.5K one 6.7 s where 22.0 and 23.8.
+With it off it gains nothing in all: the four prompts that read 2.4K to 3.7K tokens fewer were 1.7 to 2.1 s faster
+each (11,910 -> 9,491 tokens: 14.0 -> 12.3 s), and the 40 that read the same tokens took 0.15 s more each (median 146
+ms of 80, mean 177): the checkpoint's state written and the read cut once more there. Use it with a gateway that adds
+such a frame; without one it costs about as much as it gives.
+
+The default path: without the flag the new build took every prompt up where the old one did and read the same tokens
+(7 prompts of 14.1K to 16.0K, old, new and old again, with `--tail-skip 0 --expert-swaps 0 --vram-reserve-mib 1024
+--window 1`, once with the daily speedups and once without `--elastic-prefill`, `--graph-experts`, `--cpu-multi` and
+`--suffix-drafts`). Their answers could not be compared to the token: the old build's two runs wrote different tokens
+in three or four of the seven 64-token answers (from the 1st to the 55th token), and the new build's run differed
+from each of them as much. Across the turns of one engine this build is not deterministic from run to run; why was not looked
+into. Without the flag the code takes the old path (no place is given, and every test against it is false).
+
+The ready-made engines, checked again on 2026-10-24 on the same laptop: v0.2.0's release zip
+(`strata-poly-windows-x64-3ba1bf3a4bf413eb.zip`) against the zip built with this change
+(`strata-poly-windows-x64-59a3ba3a4a47ac90.zip`, RTX 20 to RTX 50, CUDA 13.0), the same prompts, one run each:
+
+| Session | | v0.2.0 | this change, `--prompt-cache-message 2048` |
+| --- | --- | --- | --- |
+| LODESTAR on, 13 turns | read a turn (of them again) | 11,541 (8,902) | 2,640 (1) |
+| | prompt time a turn; all prompts | 19.3 s; 336 s | 7.7 s; 186 s |
+| LODESTAR off, 44 turns | read a turn (of them again) | 2,378 (562) | 2,131 (316) |
+| | prompt time a turn; all prompts | 5.0 s; 234 s | 5.0 s; 234 s |
+
+Without the flag (the 7 control prompts, tail skip 0, swaps 0, 64 tokens an answer) both took every prompt up at the
+same place and read the same tokens; the answers differed as between two runs of v0.2.0 itself (v0.2.0 against
+v0.2.0: 4 of 7 answers, from the 1st to the 48th token; v0.2.0 against this change: 3 of 7).
+
 ## Where it stands
 
 | | Before (16 threads, 2026-10-18) | Now (step 8) |
@@ -1256,6 +1362,7 @@ run with `--graph-experts` stopped on the 4 GB card; Linux, HIP and SYCL.
 | Reading 1,976 tokens | 5.4 s | 3.6 s |
 | Reading 37,433 tokens | 47 s (793 tok/s) | 36 s (1,040 tok/s) |
 | Reading 139k tokens | about 270 s at 150k (2026-10-17) | 245.7 s |
+| A prompt a turn of an OpenCode session of 46K to 71K, the Gateway's LODESTAR on | | 19.2 -> 7.7 s with `--prompt-cache-message 2048` (step 11, opt-in) |
 
 Where the time goes now after a long prompt (2026-10-19, after step 7): Nsight Systems, 5 s of writing after the
 139,056-token prompt (`test_scripts/make_prompt.py 139000`), the daily flags. 10.9% of the experts came from VRAM.

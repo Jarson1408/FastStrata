@@ -736,10 +736,11 @@ POLY_SPEEDUPS = ("on", "off")
 FASTSTRATA_FAMILIES = ("qwen36", "ornith")
 # FastStrata's release: CHANGELOG.md has a section for it, release/make_faststrata_release.py tags the public tree
 # v<this>; on the screen and in the log, so a report says which one it is
-FASTSTRATA_VERSION = "0.2.0"
+FASTSTRATA_VERSION = "0.3.0"
 STRATA_URL = "https://github.com/Niko1221/Strata"
 POLY_SUFFIX_MIB = 256            # --suffix-drafts: an index of 4.2M tokens in 160 MiB of RAM (step 7)
 POLY_ELASTIC_FROM = 1024         # --elastic-prefill: a prompt of this many tokens or more is read wider (step 5)
+POLY_MESSAGE_CHECKPOINT = 2048   # --prompt-cache-message: a last message this long or shorter gets a checkpoint (step 11)
 # --graph-experts on a card of at least this much VRAM (GiB): on the 6 GB card with 2 GiB held (a 4 GB card, step 10)
 # one run of two stopped with "graph experts: the card gave up waiting for the host" (the cause was not found), and
 # the option gave 55.0 against 53.5 tok/s there
@@ -772,7 +773,7 @@ POLY_EXPERT_FLOOR_GB = 0.25
 # from another source than this fork's has not all of them, and stops at an option it does not know
 POLY_SPEEDUP_FLAGS = ("--threads", "--attn-split", "--graph-experts", "--elastic-prefill", "--suffix-drafts",
                       "--cpu-multi", "--kv-q8", "--kv-q4", "--kv-q4-keys", "--prompt-batch",
-                      "--conversation-cache-slots")
+                      "--conversation-cache-slots", "--prompt-cache-message")
 # MODEL-UPDATE Phase 1: the K-quant prompt kernels (Unsloth's UD-Q4/Q5/Q6_K_XL experts) are a library next to the CUDA
 # engine, opened only for those models; an engine without it runs them on the FP16 prompt path
 KQ_LIB = "strata_kq.dll" if WIN else "libstrata_kq.so"
@@ -6516,6 +6517,8 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
     - --cpu-multi: a CPU with AVX2 (the engine checks FMA and F16C too) and a preset with Q4_K, Q5_K or Q6_K experts
       ("cpu_multi"); the others' experts go the old path, so the flag would do nothing for them.
     - --conversation-cache-slots 8 beside a 12 GiB conversation cache (poly_conv_mib()).
+    - --prompt-cache-message 2048: NVIDIA, as measured; a checkpoint where the prompt's last message begins, for the
+      gateway's LODESTAR frame (step 11: a turn's prompt 19.3 -> 7.7 s with LODESTAR, unchanged without it).
     An AMD card gets the host's ones (--threads, --suffix-drafts, --cpu-multi, the cache): the others are CUDA code that
     was neither built nor run for HIP.  Ornith 1.5 has Qwen3.6's architecture and takes the same ones (preset_note()
     and poly_add_speedups() say whether a preset's speed was measured with them).  A family without "speedups" gets
@@ -6596,6 +6599,13 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
         items.append((["--conversation-cache-slots", str(POLY_CONV_CACHE_BIG_SLOTS)],
                       f"up to {POLY_CONV_CACHE_BIG_SLOTS} conversations parked in the {conv // 1024} GiB cache, where "
                       "the engine keeps 4 (step 2; not measured for speed)"))
+    if hip:
+        notes.append("--prompt-cache-message left out: measured on NVIDIA cards only")
+    else:                                              # the gateway's LODESTAR frame ends every prompt (step 11)
+        items.append((["--prompt-cache-message", str(POLY_MESSAGE_CHECKPOINT)],
+                      "a checkpoint where the prompt's last message begins, so the gateway's LODESTAR frame there is "
+                      "not read again with the turn: a LODESTAR turn's prompt 19.3 -> 7.7 s, without LODESTAR the "
+                      "same 5.0 s (step 11)"))
     return items, notes
 
 

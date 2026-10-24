@@ -299,6 +299,7 @@ private:
 struct CacheFlags {
     CacheOptions o;
     long long min_free_mib = 2560;   // parking leaves this much physical RAM free
+    int64_t message = 0;             // --prompt-cache-message: the longest last message given a checkpoint; 0: none
 };
 
 struct Session {
@@ -365,6 +366,7 @@ struct Session {
         engine.images(pictures.at.data(), (int) pictures.at.size());
         r.resume = kept.resume(ids);
         kept.turn_at(turn_at);
+        if (flags.message > 0) kept.message_at(strata::poly::last_message(ids, r.resume, turn_at, flags.message));
         asked += n;
         reused += r.resume;
         on_progress(r.resume, n, 0.0, true);
@@ -852,6 +854,10 @@ void usage() {
                  "                         0 = a prompt is read from its start unless it goes on from the last token)\n"
                  "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
                  "                         (default 2048, 0 = none)\n"
+                 "  --prompt-cache-message N   and one where the prompt's last message begins, before the reply's\n"
+                 "                         turn (the server's turn_at), when that message is N tokens or fewer, kept\n"
+                 "                         until the next prompt: a gateway that ends every prompt with a message the\n"
+                 "                         next one leaves out is taken up there (default 0 = none)\n"
                  "  --conversation-cache-mib N   RAM for parked conversations, so that several can take turns\n"
                  "                         without being read again (default 0 = off)\n"
                  "  --conversation-cache-slots N        parked conversations at most (default 4)\n"
@@ -953,6 +959,7 @@ int main(int argc, char** argv) {
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
+        else if (a == "--prompt-cache-message") cache.message = std::atoll(val());
         else if (a == "--conversation-cache-mib") cache.o.park_mib = std::atoll(val());
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());

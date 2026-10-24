@@ -241,8 +241,8 @@ FastStrata jest trzecim projektem w linii. [Strata](https://github.com/Niko1221/
 uruchamia Qwen3.8-Flash-Next z ekspertami podzielonymi między kartę a procesor i wniosła instalator, serwer i aplikację
 webową. [PolyStrata](https://github.com/VecSzn/PolyStrata) (VecSzn) dodała `strata-poly`, silnik, który czyta plik GGUF
 modelu tam, gdzie leży, dla Qwen3.6-35B-A3B, Ornith 1.5 i innych. FastStrata zawęża go do dwóch modeli, które mieszczą
-się na komputerze do gier, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: dziesięć
-zmierzonych kroków, dziewięć zmian w silniku i jego ustawieniach ([każda z nich](docs/RESULTS.pl.md#co-zmieniła-faststrata)).
+się na komputerze do gier, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: jedenaście
+zmierzonych kroków, dziesięć zmian w silniku i jego ustawieniach ([każda z nich](docs/RESULTS.pl.md#co-zmieniła-faststrata)).
 
 Do Qwen3.8-Flash-Next użyj [Strata](https://github.com/Niko1221/Strata). Plany: profile ekspertów dołączone do każdego
 presetu; tryb dla komputerów z 16–24 GB

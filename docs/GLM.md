@@ -264,6 +264,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--cpu-share F` | as the times say | in a batch of fewer tokens than `--stage-ahead`, the share of the experts outside VRAM that the CPU computes while the others are copied: the ones the fewest tokens chose; 0 = none |
 | `--prompt-cache N` | 6 | checkpoints kept of a conversation; 0 = only a next turn is not read again |
 | `--prompt-cache-every N` | 2048 | a checkpoint every N prompt tokens, besides the one at a prompt's end; 0 = none |
+| `--prompt-cache-message N` | 0 | and one where the prompt's last message begins, before the reply's turn, when that message is N tokens or fewer, kept until the next prompt: a gateway that ends every prompt with a message the next one leaves out is taken up there; 0 = none |
 | `--conversation-cache-mib N` | 0 | RAM for parked conversations; 0 = off |
 | `--conversation-cache-slots N` | 4 | parked conversations at most |
 | `--conversation-cache-min-tokens N` | 1024 | a shorter conversation is not parked |

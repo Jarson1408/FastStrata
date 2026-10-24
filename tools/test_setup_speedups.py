@@ -33,7 +33,8 @@ FORK_USAGE = (b"usage: strata-poly --model FILE.gguf\n  --threads N   CPU thread
               b"  --suffix-drafts MIB  ...\n  --suffix-corpus FILE\n  --kv-whole\n  --kv-q8   Qwen3.5 / 3.6\n"
               b"  --kv-q4   Qwen3.5 / 3.6\n  --kv-q4-keys q8|q4\n"
               b"  --attn-split  ...\n  --graph-experts  ...\n  --prompt-batch N\n  --elastic-prefill N\n"
-              b"  --elastic-batch N\n  --conversation-cache-mib N\n  --conversation-cache-slots N\n  --tail-skip N\n\0"
+              b"  --elastic-batch N\n  --conversation-cache-mib N\n  --conversation-cache-slots N\n  --tail-skip N\n"
+              b"  --prompt-cache-message N\n\0"
               b"--attn-split\0--kv-q8\0")
 UPSTREAM_USAGE = (b"usage: strata-poly --model FILE.gguf\n  --threads N\n  --kv-whole\n  --kv-q8x\n  --kv-q4-old\n"
                   b"  --attn-split-old\n"
@@ -46,7 +47,7 @@ LAPTOP = {"cards": [("NVIDIA GeForce RTX 3060 Laptop GPU", 6144, "86")], "ram": 
 # its daily config, strata-qwen36-ud-q4_k_m.json, 2026-10-19 (step 8): the options setup chooses, without the paths
 DAILY = ["--max-context", "147456", "--conversation-cache-mib", "12288", "--tail-skip", "6", "--kv-q8",
          "--prompt-batch", "512", "--attn-split", "--threads", "8", "--conversation-cache-slots", "8", "--graph-experts",
-         "--elastic-prefill", "1024", "--suffix-drafts", "256", "--cpu-multi"]
+         "--elastic-prefill", "1024", "--suffix-drafts", "256", "--cpu-multi", "--prompt-cache-message", "2048"]
 # a 32 GB laptop with an 8 GB card and an Intel CPU of 6 performance cores (two threads each) and 8 efficiency cores
 HYBRID = {"cards": [("NVIDIA GeForce RTX 4060 Laptop GPU", 8188, "89")], "ram": 31.7, "avx2": True,
           "threads": (14, 20), "hybrid": (6, 8), "win": True}
@@ -73,7 +74,8 @@ NO_AVX2 = {"cards": [("NVIDIA GeForce RTX 3060", 12288, "86")], "ram": 47.9, "av
 
 PATHS = ("--model", "--expert-profile", "--draft-model")
 CUDA_ONLY = ("--attn-split", "--graph-experts", "--elastic-prefill", "--kv-q8", "--kv-q4")
-NEW = CUDA_ONLY + ("--threads", "--suffix-drafts", "--cpu-multi", "--prompt-batch", "--conversation-cache-slots")
+NEW = CUDA_ONLY + ("--threads", "--suffix-drafts", "--cpu-multi", "--prompt-batch", "--conversation-cache-slots",
+                   "--prompt-cache-message")
 UNSUPPORTED = ("tiel", "gemma4", "glm", "deepseek")             # strata-poly's; the Strata engine's: test_setup_menu
 
 
@@ -219,7 +221,7 @@ class Rule(unittest.TestCase):
         self.assertNotIn("--threads", got)
         self.assertEqual(setup.hybrid_pool_workers(HYBRID["hybrid"]), 9)
         self.assertEqual(got, {"--attn-split": None, "--graph-experts": None, "--elastic-prefill": "1024",
-                               "--suffix-drafts": "256", "--cpu-multi": None})
+                               "--suffix-drafts": "256", "--cpu-multi": None, "--prompt-cache-message": "2048"})
         self.assertEqual(notes, [])
 
     def test_16_gb(self):
@@ -529,7 +531,9 @@ class Install(unittest.TestCase):
         self.assertNotIn("not supported", out)
         mine = daily_file()
         if mine is not None:                                        # the laptop's own file, read only
-            self.assertEqual(options(cfg["args"]), options(json.loads(mine.read_text(encoding="utf-8-sig"))["args"]))
+            daily = options(json.loads(mine.read_text(encoding="utf-8-sig"))["args"])
+            later = {} if "--prompt-cache-message" in daily else {"--prompt-cache-message": "2048"}   # step 11 came after it
+            self.assertEqual(options(cfg["args"]), {**daily, **later})
 
     def test_the_q3_preset_gets_neither_cpu_multi_nor_graph_experts(self):
         code, out, cfg = self.install(LAPTOP, ["--model", "UD-Q3_K_M", "--context", "147456"])
@@ -603,14 +607,15 @@ class Install(unittest.TestCase):
         self.assertEqual(options(cfg["args"]), {"--max-context": "147456", "--tail-skip": "6", "--threads": "9",
                                                 "--attn-split": None, "--graph-experts": None,
                                                 "--elastic-prefill": "1024", "--suffix-drafts": "256",
-                                                "--cpu-multi": None})
+                                                "--cpu-multi": None, "--prompt-cache-message": "2048"})
 
     def test_16_gb(self):
         code, out, cfg = self.install(PC16)
         self.assertEqual(code, 0, out)
         self.assertEqual(cfg["model_name"], "qwen3.6-35b-a3b-ud-q3_k_m")
         self.assertEqual(options(cfg["args"]), {"--max-context": "147456", "--tail-skip": "6", "--threads": "6",
-                                                "--attn-split": None, "--elastic-prefill": "1024"})
+                                                "--attn-split": None, "--elastic-prefill": "1024",
+                                                "--prompt-cache-message": "2048"})
         self.assertIn("--suffix-drafts left out", out)
         self.assertIn("--graph-experts left out: this size's experts are IQ3_XXS", out)
 

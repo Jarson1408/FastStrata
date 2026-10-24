@@ -46,6 +46,7 @@ two runs of one build.
 | 8 | `--cpu-multi` | The CPU's Q4_K, Q5_K and Q6_K experts: each row read and unpacked once for all the tokens of a window. | The CPU's experts at 40-43 GB/s where 30-40, of the 42-43 a plain read of the RAM gives; after 2K 78.2 tok/s where 74.6 (1-2% in a later check). | Lossless: ggml's bits. |
 | 9 | `--kv-q4`, `--kv-q4-keys q4` | The attention cache's values in 4 bits (8.9 KB a token), then its keys too (6.2 KB), for a card too small for the context. | 184K and the whole 256K on the 6 GB card, where `--kv-q8` holds 144K. | Lossy: a mean KL of 0.0040-0.0079 and 0.0090-0.0127; 8 and 10 sure tokens changed in 4,500 steps. Off unless the context needs it. |
 | 10 | the four presets | Old against new for every preset, what the smaller files cost the answers, and a simulated 4 GB card. | [Results](#results). | |
+| 11 | `--prompt-cache-message 2048` | A checkpoint where the prompt's last message begins, so the gateway's LODESTAR frame at the end of every prompt is not read again with the turn. | With LODESTAR, a turn's prompt 7.7 s where 19.3 (11,541 tokens read a turn -> 2,640); without it the same 5.0 s. | Lossless; without LODESTAR it costs 0.16 s a prompt and saves as much. |
 
 `--tail-skip 6`, which leaves out an expert outside VRAM that every token of a window ranks seventh or eighth, is
 PolyStrata's setting for Qwen3.6 and stays: x1.15 on the same text for a mean KL of 0.0060 (step 6). Ornith 1.5 runs
@@ -285,6 +286,7 @@ Each where the PC and the preset take it, and setup prints each with what it gav
 | `--kv-q8`, `--prompt-batch 512` | NVIDIA, where the context asked for does not fit the card in 16 bits; setup asks |
 | `--kv-q4`, then `--kv-q4-keys q4` | NVIDIA, only where even `--kv-q8` with batches of 512 does not fit; setup says what it costs and asks |
 | conversation cache 12 GiB, 8 slots | a PC with 24 GB of RAM beyond what the preset wants |
+| `--prompt-cache-message 2048` | NVIDIA |
 
 - **All speedups off:** `START-HERE.bat --setup --speedups off` (`./setup.sh --setup --speedups off`) writes the
   config as PolyStrata's setup did, and later setup runs keep that choice; `--speedups on` turns them on again. One

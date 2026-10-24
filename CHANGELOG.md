@@ -5,6 +5,19 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
+## v0.3.0 - 2026-10-24
+
+A new engine: with LODESTAR on, a turn's prompt is read in 7.7 s where it took 19.3 (the user's own OpenCode session
+replayed on the 6 GB test laptop, the ready-made engines of v0.2.0 and of this release). The ready-made engine of this
+release is a new file, `strata-poly-windows-x64-59a3ba3a4a47ac90.zip` (RTX 20 to RTX 50, CUDA 13.0).
+
+- `--prompt-cache-message N` (step 11 of docs/OPTIMIZATION_LOG.md): the engine also keeps a checkpoint where the
+  prompt's last message begins. The gateway's LODESTAR frame ends every prompt and the next prompt leaves it out; the
+  Qwen3.6 model's recurrent layers could only go back to an older checkpoint, so every turn read 11,541 tokens again
+  on that session, and now 2,640. Without LODESTAR the time is the same (5.0 s a turn). Off unless given; setup writes
+  `--prompt-cache-message 2048` on NVIDIA.
+- Without the option the engine takes every prompt up where v0.2.0's does and reads the same tokens.
+
 ## v0.2.0 - 2026-10-23
 
 The fixes from two independent code audits of v0.1.1 (the server's routes for the gateway, the check of Python's

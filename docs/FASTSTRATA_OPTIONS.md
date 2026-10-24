@@ -30,7 +30,10 @@ after 139K. The 100K figures are from the session that wrote `--attn-split` (128
 coding agent's task given again in a new conversation was written at 97.9 and 106.7 tok/s where 90.1 (step 7).
 
 A ninth, `--kv-q4`, is not a speedup: it fits a longer context into a smaller card, at a cost to the answers
-([below](#--kv-q4-the-context-cache-in-4-bits-for-a-card-too-small-for-the-context)).
+([below](#--kv-q4-the-context-cache-in-4-bits-for-a-card-too-small-for-the-context)). A tenth,
+`--prompt-cache-message`, is for a gateway that ends every prompt with a message the next one leaves out
+([below](#--prompt-cache-message-a-gateways-frame-at-the-end-of-every-prompt-not-read-again)); setup writes it on NVIDIA
+from v0.3.0.
 
 ## What setup turns on, and when
 
@@ -438,3 +441,42 @@ Measured on the laptop of the numbers above (RTX 3060 Laptop 6 GB, Ryzen 7 5800H
 [docs/OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md), step 9. Without the flags the engine is the build before's, byte
 for byte. Not tested: a task benchmark (HumanEval, tool calls), thinking on, a real 4 GB card, Ornith 1.5; AMD (HIP)
 and Intel (SYCL) builds.
+
+## `--prompt-cache-message`: a gateway's frame at the end of every prompt, not read again
+
+Qwen3.6's DeltaNet layers carry the conversation in a state that can only go back to a checkpoint, so a prompt that
+parts from the one before anywhere but at its end is taken up at the last checkpoint before that place. A gateway
+that ends every prompt with a message of its own and leaves it out of the next one, as the FastStrata Gateway does
+with LODESTAR on (`=== LODESTAR TURN ===`, a system message before the reply's turn), makes every prompt part there.
+The engine's checkpoints were all elsewhere: at the reply's turn and before the last token, both past the frame, and
+every 2,048 tokens, where six kept and the rule for which one goes left only old ones far back. On a 71K-token OpenCode
+session the engine took prompts up at 38,912 and then 53,248 turn after turn, reading 6.7K to 17.5K tokens a turn
+where 500 to 11,000 were new.
+
+With **`--prompt-cache-message N`** the engine also takes a checkpoint where the prompt's last message begins, when
+that message is N tokens or fewer, and keeps it with the turn's and the end's until the next prompt. Setup writes
+`--prompt-cache-message 2048` on NVIDIA from v0.3.0, whether LODESTAR is on or not (the Gateway's frame stays under
+about 2,000 tokens, and LODESTAR is switched in the app without setup); an install made before adds
+`"--prompt-cache-message", "2048"` to the `args` of the model's config. It needs an engine built from this source (the
+ready-made one of v0.3.0 on), as an older one stops at the unknown option. It
+takes no RAM beyond the six checkpoints there are. A read that passes the new checkpoint is cut in two there, which
+can move the answers as another batch size does. Without the flag the engine takes every prompt up where the build
+before does.
+
+| The user's OpenCode session, its prompts sent to the engine in order | Old | `--prompt-cache-message 2048` |
+| --- | ---: | ---: |
+| LODESTAR on: 13 prompts of 45.9K to 70.8K, tokens read a turn | 11,541 | **2,640** |
+| of them read again, before where the prompt parted from the one before | 8,902 | **1** |
+| the prompt's time a turn | 19.4, 19.0 s | **7.7, 7.7 s** |
+| LODESTAR off: 44 prompts of 14.1K to 51.1K, tokens read a turn | 2,378 | 2,130 |
+| the prompt's time a turn | 4.9, 4.9 s | 4.9, 4.9 s |
+
+`test_scripts/resume_bench.py run` with the daily flags of this laptop, the two builds in turns, two runs each, 16
+tokens an answer. With LODESTAR off most prompts go on from the end of the one before: four that went back to an
+earlier point read 2.4K to 3.7K tokens fewer and were 1.7 to 2.1 s faster, and the others took 0.15 s more each for
+the checkpoint, so it gains nothing there. The same prompts through the conversation cache alone, with an engine that
+is a hash of the tokens (`src/poly/resume_replay.cpp`, `test_scripts/resume_bench.py replay`), give the same places
+and the places the engine's own log showed in the session. Every number:
+[docs/OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md), step 11. Not tested: other gateways and clients, Ornith 1.5, GLM
+(whose template opens a turn with a token of its role: the checkpoint goes where the reply before began), AMD (HIP) and Intel
+(SYCL) builds (host code).

@@ -46,6 +46,7 @@ nie bardziej niż między dwoma przebiegami tej samej wersji.
 | 8 | `--cpu-multi` | Eksperci Q4_K, Q5_K i Q6_K na procesorze: każdy wiersz czytany i rozpakowywany raz dla wszystkich tokenów okna. | Eksperci procesora z prędkością 40–43 GB/s zamiast 30–40, z 42–43, które daje zwykły odczyt RAM; po 2K 78,2 tok/s zamiast 74,6 (1–2% w późniejszym sprawdzeniu). | Bezstratna: bity ggml. |
 | 9 | `--kv-q4`, `--kv-q4-keys q4` | Wartości pamięci podręcznej uwagi w 4 bitach (8,9 KB na token), potem także klucze (6,2 KB), dla karty za małej na kontekst. | 184K i cały kontekst 256K na karcie 6 GB, gdzie `--kv-q8` mieści 144K. | Stratna: średnia KL 0,0040–0,0079 i 0,0090–0,0127; 8 i 10 zmienionych pewnych tokenów w 4500 krokach. Wyłączona, chyba że kontekst jej wymaga. |
 | 10 | cztery presety | Stary silnik kontra nowy dla każdego presetu, ile mniejsze pliki kosztują odpowiedzi, i symulowana karta 4 GB. | [Wyniki](#wyniki). | |
+| 11 | `--prompt-cache-message 2048` | Punkt kontrolny tam, gdzie zaczyna się ostatnia wiadomość promptu, więc blok LODESTAR, który bramka dokleja na końcu każdego promptu, nie jest czytany od nowa z turą. | Z LODESTAR prompt tury 7,7 s zamiast 19,3 (11 541 tokenów czytanych na turę -> 2 640); bez niego te same 5,0 s. | Bezstratnie; bez LODESTAR kosztuje 0,16 s na prompt i tyle samo oszczędza. |
 
 `--tail-skip 6`, które pomija eksperta spoza VRAM, gdy każdy token okna stawia go na siódmym lub ósmym miejscu, to
 ustawienie PolyStrata dla Qwen3.6 i zostaje: x1,15 na tym samym tekście przy średniej KL 0,0060 (krok 6). Ornith 1.5
@@ -289,6 +290,7 @@ Każdą tam, gdzie komputer i preset ją przyjmują; setup wypisuje każdą raze
 | `--kv-q8`, `--prompt-batch 512` | NVIDIA, gdy żądany kontekst nie mieści się na karcie w 16 bitach; setup pyta |
 | `--kv-q4`, potem `--kv-q4-keys q4` | NVIDIA, tylko gdy nie mieści się nawet `--kv-q8` z partiami po 512; setup podaje, ile to kosztuje, i pyta |
 | pamięć rozmów 12 GiB, 8 miejsc | komputerowi z 24 GB RAM ponad to, czego chce preset |
+| `--prompt-cache-message 2048` | NVIDIA |
 
 - **Wszystkie przyspieszenia wyłączone:** `START-HERE.bat --setup --speedups off` (`./setup.sh --setup --speedups off`)
   zapisuje konfigurację tak, jak robił to setup PolyStrata, a kolejne uruchomienia setupu zachowują ten wybór;

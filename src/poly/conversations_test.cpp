@@ -74,11 +74,12 @@ struct Chat {
     std::vector<std::pair<int64_t, uint8_t*>> due;
     explicit Chat(const CacheOptions& o) : kept(e, o) {}
 
-    // A request as the server makes it: the prompt, where its last turn begins, then `reply` generated tokens.
-    // Returns where the prompt was taken up, and leaves the tokens the engine then holds in `ids`.
-    int64_t ask(std::vector<int32_t>& ids, int reply = 3, int64_t turn = -1) {
+    // A request as the server makes it: the prompt, where its last turn and its last message begin, then `reply`
+    // generated tokens.  Returns where the prompt was taken up, and leaves the tokens the engine then holds in `ids`.
+    int64_t ask(std::vector<int32_t>& ids, int reply = 3, int64_t turn = -1, int64_t message = -1) {
         const int64_t n = (int64_t) ids.size(), from = kept.resume(ids);
         kept.turn_at(turn);
+        kept.message_at(message);
         check(from >= 0 && from < n && e.at == from, "a prompt is taken up before its last token");
         for (int64_t i = from; i < n;) {
             const bool last = i == n - 1;
@@ -93,7 +94,7 @@ struct Chat {
                 e.h ^= 0x5EEDull;
                 const int64_t back = kept.rewind();
                 check(back <= i && e.at == back && e.holds(kept.seq()), "a read given up leaves the last checkpoint");
-                return ask(ids, reply, turn);
+                return ask(ids, reply, turn, message);
             }
             if (far > 0 && !last) {
                 kept.inside(i, m, due);
@@ -223,6 +224,58 @@ void last_turn() {
     check(e.ask(b) == 4096, "without the place, the checkpoint before the last token is past where they differ");
 }
 
+// A gateway ends every prompt with a message of its own (LODESTAR's turn frame) and the next prompt leaves it out:
+// the reply and the tools' answer come where the frame was.  The checkpoints at the turn and before the last token
+// are past where the prompts part; with six kept, the ones every 2,048 tokens inside a short read have neighbours
+// closer together than the old ones and go first, so a long conversation was taken up thousands of tokens back,
+// from the same old checkpoint turn after turn.  With the place where the last message begins it is taken up there.
+void last_message() {
+    // where the last message begins: the token at the turn, the time before
+    using strata::poly::last_message;
+    std::vector<int32_t> ids((size_t) 9000, 7);
+    ids[0] = ids[4000] = ids[8500] = ids[8990] = 99;
+    check(last_message(ids, 0, 8990, 2048) == 8500, "the last message begins at the turn token before the turn");
+    check(last_message(ids, 0, 8990, 490) == 8500 && last_message(ids, 0, 8990, 489) == -1, "at most N tokens back");
+    check(last_message(ids, 8500, 8990, 2048) == -1, "past where the prompt is taken up");
+    check(last_message(ids, 0, 8500, 8192) == 4000 && last_message(ids, 0, 4000, 8192) == -1, "not at token 0");
+    check(last_message(ids, 0, -1, 2048) == -1 && last_message(ids, 0, 9000, 2048) == -1 &&
+          last_message(ids, 0, 8990, 0) == -1, "a turn inside the prompt, and N above 0");
+
+    const std::vector<int32_t> head = text(2, 3), think = text(3, 2);
+    for (const bool place : {false, true}) {
+        for (const bool side : {false, true}) {   // a subagent's request between the turns: the chat is parked
+            Chat c(options(64, 8));
+            std::vector<int32_t> chat = text(1, 30000), sub = text(9, 4000);
+            int64_t frame = -1, turn = -1, worst = 0;
+            for (int k = 0; k < 8; ++k) {
+                if (k > 0) chat = chat + text(100 + k, 700);   // the reply and the tools' answer
+                const int64_t at = (int64_t) chat.size();
+                std::vector<int32_t> p = chat + head + text(200 + k, 500) + head + think;
+                const int64_t from = c.ask(p, 3, at + 503, place ? at : -1);
+                if (k > 0 && place) check(from == frame, "the next prompt is taken up where the frame began");
+                if (k > 1) worst = std::max(worst, at - from);
+                frame = at, turn = at + 503;
+                if (side) {
+                    sub = sub + text(300 + k, 50);
+                    c.ask(sub);
+                }
+            }
+            check(turn > frame, "the frame comes before the reply's turn");
+            if (!place) check(worst > 4096, "without it the prompt is taken up thousands of tokens back");
+        }
+    }
+    // the drop rule still keeps the turn and the end of the prompt beside it, and a prompt that goes on from the
+    // reply still goes on from the engine
+    Chat c(options(0));
+    std::vector<int32_t> a = text(1, 9000);
+    c.ask(a, 3, 8990, 8500);
+    std::vector<int32_t> b(a.begin(), a.begin() + 8995);
+    b = b + text(5, 10);
+    check(c.ask(b) == 8990, "the turn's checkpoint stays beside it");
+    b = b + text(6, 100);
+    check(c.ask(b) == 9008, "a prompt that goes on from the reply goes on from the engine");
+}
+
 void limits() {
     // two slots: a third conversation pushes out the one not used for longest
     Chat c(options(64, 2));
@@ -279,7 +332,8 @@ void any_order() {
                 ids = ids + text((int) rng(), (int) (rng() % 400));
             }
             const int64_t turn = rng() % 2 ? (int64_t) (rng() % ids.size()) : -1;
-            c.ask(ids, (int) (rng() % 5), turn);
+            const int64_t message = turn > 0 && rng() % 2 ? (int64_t) (rng() % turn) : -1;
+            c.ask(ids, (int) (rng() % 5), turn, message);
             chats.push_back(ids);
             check(c.kept.parked() <= (size_t) std::max(o.park_slots, 0), "no more parked than slots");
             check(c.kept.parked_bytes() <= ((size_t) o.park_mib << 20), "no more parked than the budget");
@@ -321,6 +375,7 @@ int main() {
         two_conversations();
         shared_start();
         last_turn();
+        last_message();
         limits();
         any_order();
     }

@@ -26,10 +26,21 @@
 
 namespace strata::poly {
 
+/// Where a prompt's last message begins (Conversations::message_at()): the token that opens the turn at turn_at, the
+/// time before that, when it is at most `most` tokens back and past `from`, where the prompt is taken up; -1: none.
+/// The other engine's message_checkpoint_boundary, with the token that opens the reply's turn as the turn token.
+inline int64_t last_message(const std::vector<int32_t>& ids, int64_t from, int64_t turn_at, int64_t most) {
+    if (most < 1 || turn_at <= from || turn_at >= (int64_t) ids.size()) return -1;
+    for (int64_t i = turn_at - 1; i > from && turn_at - i <= most; --i)
+        if (ids[(size_t) i] == ids[(size_t) turn_at]) return i;
+    return -1;
+}
+
 struct CacheOptions {
     int checkpoints = 6;       ///< kept per conversation; 0: a prompt is reread unless it goes on from the last token
-    int64_t every = 2048;      ///< a checkpoint every so many prompt tokens, besides the one at a prompt's end and
-                               ///< the one where its last turn begins (turn_at()); 0: none
+    int64_t every = 2048;      ///< a checkpoint every so many prompt tokens, besides the one at a prompt's end, the
+                               ///< one where its last turn begins (turn_at()) and the one where its last message
+                               ///< begins (message_at()); 0: none
     int64_t park_mib = 0;      ///< host memory for parked conversations; 0: none is parked
     int park_slots = 4;        ///< parked conversations at most
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
@@ -49,7 +60,7 @@ public:
     /// Leaves the engine at the furthest point of `ids` that can be come back to, and returns that position.
     int64_t resume(const std::vector<int32_t>& ids) {
         const int64_t n = (int64_t) ids.size();
-        turn_ = -1;
+        turn_ = message_ = -1;
         size_t best = cur_;
         int64_t at = 0, same = 0;
         for (size_t i = 0; i < slots_.size(); ++i) {
@@ -80,10 +91,17 @@ public:
     /// pass adds none.
     void turn_at(int64_t at) { turn_ = at; }
 
+    /// And one where the prompt's last message begins, the turn before that one (--prompt-cache-message).  A client
+    /// or a gateway that ends every prompt with a message of its own and leaves it out of the next one (a reminder,
+    /// a project-memory frame) sends the next prompt alike only up to there: the checkpoints at the turn and before
+    /// the last token are past it.  It is kept, as the prompt's last two are, until the next prompt.
+    void message_at(int64_t at) { message_ = at; }
+
     /// Of `want` tokens from position `at`, how many to read before the next checkpoint is due.
     int64_t until_checkpoint(int64_t at, int64_t want) const {
         if (o_.checkpoints < 1) return want;
         if (o_.every > 0) want = std::min(want, (at / o_.every + 1) * o_.every - at);
+        if (message_ > at) want = std::min(want, message_ - at);
         return turn_ > at ? std::min(want, turn_ - at) : want;
     }
 
@@ -91,7 +109,9 @@ public:
     /// due.  One sits before the last token of every prompt, so coming back to it leaves a token to read and the
     /// logits that come with it.
     void before(int64_t at, bool last) {
-        if (o_.checkpoints < 1 || at < 1 || (!last && at != turn_ && (o_.every < 1 || at % o_.every != 0))) return;
+        if (o_.checkpoints < 1 || at < 1 ||
+            (!last && at != turn_ && at != message_ && (o_.every < 1 || at % o_.every != 0)))
+            return;
         if (const BlobPtr b = mark(at)) e_.save_state(b->p.get());
     }
 
@@ -111,6 +131,8 @@ public:
         std::vector<int64_t> due;
         if (o_.every > 0)
             for (int64_t p = (at / o_.every + 1) * o_.every; p < at + n; p += o_.every) due.push_back(p);
+        if (message_ > at && message_ < at + n && (o_.every < 1 || message_ % o_.every != 0))
+            due.insert(std::upper_bound(due.begin(), due.end(), message_), message_);
         if (turn_ > at && turn_ < at + n && (o_.every < 1 || turn_ % o_.every != 0))
             due.insert(std::upper_bound(due.begin(), due.end(), turn_), turn_);
         if (due.empty()) return;
@@ -252,13 +274,14 @@ private:
     }
 
     // Of more checkpoints than are kept, the one that goes: the one whose neighbours are closest together.  The
-    // last two stay, the end of this prompt and of the one before being where a client most often comes back to.
-    static size_t drop_of(const std::vector<int64_t>& pos) {
+    // last two stay, the end of this prompt and of the one before being where a client most often comes back to,
+    // and so does the one where this prompt's last message begins (message_at()) while there are others to go.
+    size_t drop_of(const std::vector<int64_t>& pos) const {
         size_t drop = 0;
         int64_t gap = INT64_MAX;
         for (size_t k = 0; k + 2 < pos.size(); ++k) {
             const int64_t g = pos[k + 1] - (k ? pos[k - 1] : 0);
-            if (g < gap) gap = g, drop = k;
+            if (g < gap && pos[k] != message_) gap = g, drop = k;
         }
         return drop;
     }
@@ -405,6 +428,7 @@ private:
     std::vector<Checkpoint> due_;   // inside()'s checkpoints, until read() makes them the conversation's
     std::vector<int64_t> after_;    // where the conversation's checkpoints are once that read is done
     int64_t turn_ = -1;             // turn_at()'s place in the prompt being read; -1: none
+    int64_t message_ = -1;          // message_at()'s; -1: none
 };
 
 }  // namespace strata::poly
