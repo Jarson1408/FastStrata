@@ -736,7 +736,7 @@ POLY_SPEEDUPS = ("on", "off")
 FASTSTRATA_FAMILIES = ("qwen36", "ornith")
 # FastStrata's release: CHANGELOG.md has a section for it, release/make_faststrata_release.py tags the public tree
 # v<this>; on the screen and in the log, so a report says which one it is
-FASTSTRATA_VERSION = "0.4.0"
+FASTSTRATA_VERSION = "0.5.0"
 STRATA_URL = "https://github.com/Niko1221/Strata"
 POLY_SUFFIX_MIB = 256            # --suffix-drafts: an index of 4.2M tokens in 160 MiB of RAM (step 7)
 POLY_ELASTIC_FROM = 1024         # --elastic-prefill: a prompt of this many tokens or more is read wider (step 5)
@@ -745,6 +745,10 @@ POLY_MESSAGE_CHECKPOINT = 2048   # --prompt-cache-message: a last message this l
 # one run of two stopped with "graph experts: the card gave up waiting for the host" (the cause was not found), and
 # the option gave 55.0 against 53.5 tok/s there
 POLY_GRAPH_MIN_VRAM_GB = 5
+# --stage-next on a card of at least this much VRAM (GiB): it was measured on the 6 GB laptop (step 15), where the
+# expert cache lends its second staging buffer (512 MiB); a 4 GB card has next to no cache to lend, the buffer would
+# come from the VRAM kept free, and that was not run
+POLY_STAGE_NEXT_MIN_VRAM_GB = 5
 POLY_CONV_CACHE_BIG_MIB = 12288  # step 2: 12 GiB and 8 slots, where the RAM beside the model's holds that twice over
 POLY_CONV_CACHE_BIG_SLOTS = 8
 # --kv-q8: a token's attention rows in Q8_0 instead of fp16, Qwen3.6's 10 attention layers and its MTP block with 2 KV
@@ -773,7 +777,7 @@ POLY_EXPERT_FLOOR_GB = 0.25
 # from another source than this fork's has not all of them, and stops at an option it does not know
 POLY_SPEEDUP_FLAGS = ("--threads", "--attn-split", "--graph-experts", "--elastic-prefill", "--suffix-drafts",
                       "--cpu-multi", "--kv-q8", "--kv-q4", "--kv-q4-keys", "--prompt-batch",
-                      "--conversation-cache-slots", "--prompt-cache-message", "--lend-staging")
+                      "--conversation-cache-slots", "--prompt-cache-message", "--lend-staging", "--stage-next")
 # MODEL-UPDATE Phase 1: the K-quant prompt kernels (Unsloth's UD-Q4/Q5/Q6_K_XL experts) are a library next to the CUDA
 # engine, opened only for those models; an engine without it runs them on the FP16 prompt path
 KQ_LIB = "strata_kq.dll" if WIN else "libstrata_kq.so"
@@ -6513,6 +6517,9 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
     - --lend-staging: one NVIDIA card, as --elastic-prefill; the engine checks that the card maps VRAM a piece at a
       time and that the swaps are on (step 13: the agent benchmark 82.1, 82.0 -> 85.0, 83.9 tok/s on the 6 GB laptop;
       on a simulated 4 GB card a third of the experts from VRAM where none).
+    - --stage-next: one NVIDIA card of POLY_STAGE_NEXT_MIN_VRAM_GB or more, as --elastic-prefill otherwise; the engine
+      checks VMM and MMQ (step 15: a 1,501-token agent turn after 38K read in 3.9 s where 5.0, the agent benchmark's
+      prompts 79.6 s where 90, on the 6 GB laptop).
     - --kv-q8, --prompt-batch 512: NVIDIA, where the context needs them (poly_kv_plan()).
     - --kv-q4, then --kv-q4-keys q4: NVIDIA, where even --kv-q8 and --prompt-batch 512 leave the context too little
       VRAM (poly_kv_plan()).
@@ -6562,8 +6569,8 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
             notes.append(f"--attn-split left out: it runs on NVIDIA cards from Turing (RTX 20) on, and sm_{archs[0]} "
                          "is older")
         if multi:
-            notes.append("--graph-experts, --elastic-prefill and --lend-staging left out: they run on one card, and "
-                         "these cards share the model's layers")
+            notes.append("--graph-experts, --elastic-prefill, --lend-staging and --stage-next left out: they run on one "
+                         "card, and these cards share the model's layers")
         else:
             vram = gpu.get("vram_gb")
             if archs[0] < 70:
@@ -6586,6 +6593,15 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
                           "the prompt batches' staging buffer holds cached experts while an answer is written: an "
                           "agent's 35 answers 85.0 and 83.9 tok/s where 82.1 and 82.0; on a simulated 4 GB card a "
                           "third of the experts from VRAM where none (step 13)"))
+            if vram is not None and vram < POLY_STAGE_NEXT_MIN_VRAM_GB:
+                notes.append(f"--stage-next left out: this card has {vram:.0f} GB of VRAM, where the expert cache has "
+                             "next to nothing to lend its second staging buffer; it was measured on a 6 GB card "
+                             "(step 15)")
+            else:
+                items.append((["--stage-next"],
+                              "the next layer's experts copied while a layer of a prompt runs, into a second staging "
+                              "buffer the expert cache lends: an agent's 1,501-token turn after 38K read in 3.9 s "
+                              "where 5.0, its 35 prompts in 79.6 s where 90 (step 15)"))
     if ram >= need_ram:
         items.append((["--suffix-drafts", str(POLY_SUFFIX_MIB)],
                       "guesses from every conversation since the engine started, in 160 MiB of RAM: an agent's task "
@@ -6607,7 +6623,7 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
                       f"up to {POLY_CONV_CACHE_BIG_SLOTS} conversations parked in the {conv // 1024} GiB cache, where "
                       "the engine keeps 4 (step 2; not measured for speed)"))
     if hip:
-        notes.append("--prompt-cache-message and --lend-staging left out: measured on NVIDIA cards only")
+        notes.append("--prompt-cache-message, --lend-staging and --stage-next left out: measured on NVIDIA cards only")
     else:                                              # the gateway's LODESTAR frame ends every prompt (step 11)
         items.append((["--prompt-cache-message", str(POLY_MESSAGE_CHECKPOINT)],
                       "a checkpoint where the prompt's last message begins, so the gateway's LODESTAR frame there is "

@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -63,6 +64,10 @@ struct Options {
                                   ///< read of several calls and this many tokens every call does; 0: never.  Under
                                   ///< it a call copies only the experts it routes to, which with 8 GB of VRAM was
                                   ///< the faster of the two up to about 1,000 tokens
+    bool stage_next = false;      ///< a read of stage_ahead tokens or more has a second staging buffer, which the
+                                  ///< expert cache lends it for the read, and the next layer's experts that are not
+                                  ///< cached are copied into it, by a thread of their own, while this layer runs
+                                  ///< (lend_next()).  One card that maps VRAM a piece at a time (--stage-next)
     float cpu_share = -1;         ///< of the experts outside VRAM that such a call routes to, the share the CPU
                                   ///< computes while the others are copied: the ones the fewest tokens chose;
                                   ///< below 0: as the two took the time between them; 0: none
@@ -454,7 +459,21 @@ protected:
     template <class F>
     void* record(F&& work);
     void moe_rows(Layer& L, int il, int n);
+    // Pinned host memory that experts pass through on their way to a staging buffer: two chunks that take turns, and
+    // the events that mark each one's upload done.
+    struct Pinned {
+        uint8_t* h[2] = {};
+        void* ev[2] = {};
+        int turn = 0;
+    };
     void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false);
+    void put(const Layer& L, const int32_t* experts, int m, uint8_t* to, Pinned& p, void* stream, Workers& w);
+    /// Options::stage_next: the second staging buffer for a read, and back; the next layer's copy into it.
+    bool lend_next(int n);
+    void end_next();
+    bool take_next(const Layer& L);
+    void send_next(int il, int n);
+    void wait_next();
     void mind_memory();
     void follow(int written);
     void follow_loop();
@@ -697,8 +716,7 @@ protected:
     bool loan_off_ = false;                       ///< the card would not map it: not again until the next batch
     std::vector<std::pair<unsigned long long, size_t>> loan_pieces_;   ///< the VRAM moving between the two
     bool loan_said_ = false;
-    uint8_t* h_stage_[2] = {};                    ///< pinned; filled in turn
-    void* ev_stage_[2] = {};                      ///< marks the upload out of each
+    Pinned pin_;                                  ///< filled in turn
     void* up_ = nullptr;                          ///< the stream of the uploads that start before the routing
     void* ev_ahead_ = nullptr;                    ///< marks the last of them
     void* ev_free_ = nullptr;                     ///< marks a layer's last read of the staging buffer
@@ -708,7 +726,32 @@ protected:
     double ahead_ms_ = 0, route_ms_ = 0;          ///< what that layer's copy ahead took, and the card to its routing
     bool shared_ahead_ = false;                   ///< read() runs several calls: each copies ahead, whatever its size
     size_t stage_bytes_ = 0, chunk_bytes_ = 0;
-    int stage_turn_ = 0;
+    // Options::stage_next (lend_next()): while a read runs, the layers take the load's staging buffer and a second
+    // one in turn, and a thread copies the next layer's experts into the one this layer does not read.
+    uint8_t* stages_[2] = {};                     ///< the load's buffer and the lent one; stage_ is the one in use
+    int stage_at_ = 0;                            ///< which
+    bool next_on_ = false;                        ///< the read under way has the second one
+    Mapped next_vm_;                              ///< its VRAM
+    std::vector<std::pair<unsigned long long, size_t>> next_pieces_;   ///< the VRAM moving from the cache and back
+    Pinned next_pin_;                             ///< the thread's pinned chunks
+    void* next_st_ = nullptr;                     ///< the stream of its uploads
+    void* ev_next_ = nullptr;                     ///< marks the last of a layer's
+    std::unique_ptr<Workers> next_workers_;       ///< fill the thread's chunks
+    std::thread next_th_;                         ///< from the first read that has the second buffer on
+    std::mutex next_m_;
+    std::condition_variable next_cv_;
+    std::function<void()> next_job_;              ///< the copy the thread is to make, until it has made it
+    bool next_quit_ = false;
+    std::exception_ptr next_err_;                 ///< what the last copy threw; wait_next() throws it
+    int next_il_ = -1;                            ///< the layer whose experts the thread copies, or -1
+    std::vector<int32_t> next_list_;              ///< those experts, as plan_ahead() lists them
+    struct NextLent {
+        size_t bytes = 0, budget = 0;   ///< what the expert cache gave up for the read, and budget_ before
+        std::vector<int64_t> gone;      ///< the experts that left the cache (shrink_cache())
+        int n = 0, had = 0, kept = 0;   ///< the read's tokens; the cache's experts before it and while it ran
+        int taken = 0, missed = 0;      ///< layers whose copy ahead was in the second buffer, and went for nothing
+        double ms = 0;                  ///< what lend_next() took
+    } next_lent_;
     std::vector<int32_t> ids_, count_, first_, group_, round_;
     std::vector<float> route_tmp_;   ///< route()'s scratch, a share for each host thread
     struct Run {

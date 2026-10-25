@@ -105,7 +105,8 @@ i pisanie zwolniło kilkukrotnie. Prompt 32K był czytany od początku w 37–40
 - **Co robi setup.** Na karcie z 3 do 4,5 GB wolnej pamięci menu proponuje Q4 przy 32K (od 26,1 GB wolnego RAM), Q3
   przy 48K (od 20,6), Ornith APEX-I-COMPACT przy 32K (od 21,8) i APEX-I-QUALITY przy 24K (szacunek, od 27,6), wszystkie
   z pamięcią 8-bitową, i poleca pierwszy, który uruchamia 32K lub więcej i mieści się w Twoim RAM. Karta poniżej 5 GB
-  nie dostaje `--graph-experts` (z nim jeden przebieg z dwóch się tam zatrzymał, a dawał około 3%).
+  nie dostaje `--graph-experts` (z nim jeden przebieg z dwóch się tam zatrzymał, a dawał około 3%) ani `--stage-next`
+  (jej cache prawie nie ma czego mu pożyczyć, a tam go nie uruchamiano).
 - **Od v0.4.0:** `--lend-staging`, które setup dopisuje na jednej karcie NVIDIA, umieszcza na takiej karcie
   około jednej trzeciej ekspertów w VRAM, gdzie wcześniej nie mieścił się żaden: z Q4 i pamięcią 8-bitową 11–19%
   szybciej bez zgadywania ([krok 13](docs/OPTIMIZATION_LOG.md)). Mierzone z włączonym `--graph-experts`, którego setup
@@ -123,7 +124,7 @@ AMD zajrzyj do [PolyStrata](https://github.com/VecSzn/PolyStrata), projektu, z k
 - **Linux z ROCm** (z jego pakietami deweloperskimi): setup kompiluje silnik, bo gotowy silnik z wydania jest dla
   NVIDIA. Działają przyspieszenia po stronie procesora (`--threads`, `--cpu-multi`, `--suffix-drafts`, pamięć rozmów),
   nie działają te na karcie (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`,
-  `--lend-staging`). Pamięć uwagi zostaje 16-bitowa, 22 KB na token zamiast 11,7, więc ta sama ilość VRAM mieści
+  `--lend-staging`, `--stage-next`). Pamięć uwagi zostaje 16-bitowa, 22 KB na token zamiast 11,7, więc ta sama ilość VRAM mieści
   mniej więcej połowę kontekstu.
 - **Niezmierzone** na żadnej karcie AMD. Przeniesienie przyspieszeń karty na HIP albo pomiar z karty AMD są mile
   widziane: [docs/TEST_REQUESTS.md](docs/TEST_REQUESTS.md).
@@ -275,8 +276,8 @@ laptopie testowym, dla UD-Q4_K_M przy 144K:
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
---conversation-cache-slots 8 --prompt-cache-message 2048
+--elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
+--conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Każdą tam, gdzie komputer i preset ją przyjmują ([który komputer dostaje którą](docs/RESULTS.pl.md#konfiguracja)), a

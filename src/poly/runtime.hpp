@@ -34,7 +34,10 @@ constexpr int kStageRows = 32;
 // of more than two calls keeps those rows in pinned host memory, 64 KiB a token for GLM and 8 for Qwen3.6: this
 // much is 8,192 tokens of GLM's and 65,536 of Qwen3.6's.
 constexpr size_t kReadBytes = size_t(512) << 20;
-constexpr size_t kChunkBytes = size_t(512) << 20;   // one upload, and each of the two pinned buffers
+// One upload, and each of the two pinned buffers: the workers copy the next chunk of a layer's experts into one
+// while the other uploads.  With a chunk of 512 MiB, a whole layer of Qwen3.6 UD-Q4_K_M's 465 MB, the card waited
+// 42 ms a layer for the host's copy before its own began (OPTIMIZATION_LOG step 14).
+constexpr size_t kChunkBytes = size_t(64) << 20;
 // Zero bytes behind every matrix the batched kernels may multiply (Mmq::fits): they read up to a step of 256
 // columns past a row that ends inside one, which is at most 7 blocks of 34 bytes.
 constexpr size_t kTail = 256;

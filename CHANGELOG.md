@@ -5,6 +5,23 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
+## v0.5.0 - 2026-10-26
+
+A new engine that reads prompts faster. On the 6 GB test laptop an agent's turn of 1,501 tokens after a 38K
+conversation is read in 3.9 s where v0.4.0 took 6.4, and the agent benchmark's 35 prompts in 79.6 s where 108; the
+answers are written as fast as before. The ready-made engine of this release is a new file,
+`strata-poly-windows-x64-f8247c52a4fa5516.zip` (RTX 20 to RTX 50, CUDA 13.0).
+
+- A layer's experts are copied to the card in pieces of 64 MiB (step 15 of docs/OPTIMIZATION_LOG.md), so the host's
+  copy of one piece runs under the card's copy of the one before: the 1,501-token turn 6.4 -> 5.0 s, a fresh 37K
+  prompt 36.1 -> 34.9 s, the same tokens as v0.4.0, 0.9 GiB less pinned memory. Nothing to switch on.
+- `--stage-next` (step 15): a read of 1,024 tokens or more gets a second staging buffer the expert cache lends it, and
+  the next layer's experts are copied while a layer runs: the 1,501-token turn 5.0 -> 3.9 s, the agent benchmark's
+  prompts 90 -> 79.6 s; the answers move as between two runs without it. Setup writes it on one NVIDIA card with 5 GB
+  of VRAM or more. It needs this release's engine: with an older one setup leaves the option out and says so. An
+  install updated with UPDATE.bat keeps its config: add `"--stage-next"` to the `args` of `strata-<model>.json`.
+- Without `--stage-next` the engine writes v0.4.0's tokens.
+
 ## v0.4.0 - 2026-10-25
 
 A new engine: while an answer is written, the VRAM that prompts are read through holds more of the model's experts.

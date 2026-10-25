@@ -49,6 +49,7 @@ two runs of one build.
 | 11 | `--prompt-cache-message 2048` | A checkpoint where the prompt's last message begins, so the gateway's LODESTAR frame at the end of every prompt is not read again with the turn. | With LODESTAR, a turn's prompt 7.7 s where 19.3 (11,541 tokens read a turn -> 2,640); without it the same 5.0 s. | Lossless; without LODESTAR it costs 0.16 s a prompt and saves as much. |
 | 12 | (measured) | Which experts the cache should hold: a routing trace (`STRATA_ROUTE_TRACE`) and a simulator of cache rules, checked against the engine's own counts. | No rule that does not know the future was more than 3% better than the engine's; tables by kind of work (code, documents) did not help. | |
 | 13 | `--lend-staging` | The prompt batches' staging buffer (500 MiB) holds cached experts while an answer is written, and goes back before the next batch. | The agent benchmark 85.0 and 83.9 tok/s where 82.1 and 82.0; a simulated 4 GB card a third of the experts from VRAM where none, 11-19% faster without guesses. | Lossless: as between two runs without it. |
+| 15 | pieces of 64 MiB; `--stage-next` | A layer's experts copied to the card in pieces, the host's copy under the card's (always on); with `--stage-next` a second staging buffer the expert cache lends a prompt's read, the next layer's experts copied while a layer runs. | An agent's 1,501-token turn after 38K read in 5.0 s with the pieces and 3.9 s with `--stage-next`, where 6.4; the agent benchmark's prompts 90 and 79.6 s where 108. | The pieces: the same tokens. `--stage-next`: as between two runs without it. |
 
 `--tail-skip 6`, which leaves out an expert outside VRAM that every token of a window ranks seventh or eighth, is
 PolyStrata's setting for Qwen3.6 and stays: x1.15 on the same text for a mean KL of 0.0060 (step 6). Ornith 1.5 runs
@@ -272,8 +273,8 @@ Setup writes the engine's options into the model's run config, `strata-<family>-
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
---conversation-cache-slots 8 --prompt-cache-message 2048
+--elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
+--conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Each where the PC and the preset take it, and setup prints each with what it gave:
@@ -285,6 +286,7 @@ Each where the PC and the preset take it, and setup prints each with what it gav
 | `--graph-experts` | one NVIDIA card from Volta on with 5 GB of VRAM or more; not UD-Q3_K_M, whose experts it does not read |
 | `--elastic-prefill 1024` | one NVIDIA card |
 | `--lend-staging` | one NVIDIA card |
+| `--stage-next` | one NVIDIA card with 5 GB of VRAM or more |
 | `--suffix-drafts 256` | a PC with the RAM setup estimates the preset wants |
 | `--cpu-multi` | a CPU with AVX2 and a preset with K-quant experts (not UD-Q3_K_M) |
 | `--kv-q8`, `--prompt-batch 512` | NVIDIA, where the context asked for does not fit the card in 16 bits; setup asks |

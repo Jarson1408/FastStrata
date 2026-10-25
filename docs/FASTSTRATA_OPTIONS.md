@@ -35,7 +35,10 @@ A ninth, `--kv-q4`, is not a speedup: it fits a longer context into a smaller ca
 ([below](#--prompt-cache-message-a-gateways-frame-at-the-end-of-every-prompt-not-read-again)); setup writes it on NVIDIA
 from v0.3.0. An eleventh, `--lend-staging`, gives the prompt batches' staging buffer to the expert cache while an
 answer is written ([below](#--lend-staging-the-staging-buffers-vram-to-the-expert-cache-while-an-answer-is-written));
-setup writes it on one NVIDIA card from v0.4.0.
+setup writes it on one NVIDIA card from v0.4.0. A twelfth, `--stage-next`, copies the next layer's experts while a
+layer of a prompt runs, into a second staging buffer the expert cache lends for the read
+([below](#--stage-next-the-next-layers-experts-copied-while-a-layer-runs)); setup writes it on one NVIDIA card of
+5 GB or more from v0.5.0.
 
 ## What setup turns on, and when
 
@@ -68,6 +71,7 @@ card, CPU and RAM take them, and prints each one with what it gave:
 | `--graph-experts` | each layer of an answer as one CUDA graph | 10% less time a window after 2K, 7% after 37K (step 4) | one NVIDIA card from Volta on with 5 GB of VRAM or more, not a layer split, not UD-Q3_K_M |
 | `--elastic-prefill 1024` | a long prompt read in wider batches, on VRAM the expert cache lends it | 37K read in 36.0 s where 47.0, 139K in 245.7 s where 264.1 (step 5) | one NVIDIA card |
 | `--lend-staging` | the prompt batches' staging buffer (500 MiB) holds cached experts while an answer is written | an agent's 35 answers 85.0, 83.9 tok/s where 82.1, 82.0; a simulated 4 GB card 11-19% faster without guesses (step 13) | one NVIDIA card (the engine checks that it maps VRAM a piece at a time) |
+| `--stage-next` | a prompt's next layer's experts copied while a layer runs, into a second staging buffer the expert cache lends for the read | an agent's 1,501-token turn after 38K read in 3.88, 3.86 s where 4.97, 4.97; its 35 prompts in 79.4, 79.8 s where 90.2, 89.7 (step 15) | one NVIDIA card with 5 GB of VRAM or more (the engine checks VMM and MMQ) |
 | `--suffix-drafts 256` | guesses from every conversation the engine has seen, in 160 MiB of RAM | a task given again in a new conversation 97.9, 106.7 tok/s where 90.1; a plain chat as before (step 7) | a PC with the RAM setup estimates the preset wants |
 | `--cpu-multi` | the CPU's Q4_K, Q5_K and Q6_K experts read once for all the tokens of a window, the same bits | 78.2 tok/s after 2K where 74.6; 1-2% in a later check (step 8) | a preset with K-quant experts (not UD-Q3_K_M), on a CPU with AVX2 |
 | `--kv-q8` | the attention cache in 8 bits: 11.7 KB a token where 22 KB | a 144K context on the 6 GB card | NVIDIA, when the context asked for does not fit the card in 16 bits by setup's estimate. Setup asks (`--yes` takes it) |
@@ -518,3 +522,40 @@ it stops at the unknown option, and setup leaves the option out of a config for 
 simulated 4 GB card it was measured with `--graph-experts`, which setup leaves out under 5 GB; without it the loan
 was not measured. Every number: [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md), step 13. Not tested: a real 4 GB card,
 cards of 8 GB or more, AMD (HIP), Linux, Ornith 1.5, contexts past 37K on the whole card.
+
+## `--stage-next`: the next layer's experts copied while a layer runs
+
+A prompt batch of 1,024 tokens or more copies every layer's experts that are not cached to the card through a staging
+buffer in VRAM: about 465 MB a layer with Qwen3.6 UD-Q4_K_M, 70 ms over PCIe 3.0 x8, and the layer's products wait for
+it. Since step 15 the engine copies a layer in pieces of 64 MiB, so that the host's copy of a piece into pinned memory
+runs under the card's copy of the one before (the same tokens, nothing to switch on). With **`--stage-next`** a read of
+`--stage-ahead` tokens or more (1,024) also gets a second staging buffer, which the expert cache lends it for the read
+(the experts used least leave the cache and come back before the answer, as with `--elastic-prefill`), and a thread of
+its own copies the next layer's experts into it while the card runs the layer: the read takes about as long as its
+copies. An agent's turn that is taken up at a checkpoint (`--prompt-cache-message`) gains most, because between two
+layers the engine waits for the card to save the layer's state there.
+
+| On the test PC, in turns | v0.4.0 | Pieces (default) | `--stage-next` |
+| --- | ---: | ---: | ---: |
+| A turn of 1,501 tokens after a 38K conversation | 6.40, 6.39 s | 4.97, 4.97 s | **3.88, 3.86 s** |
+| A turn of 2,500 tokens | 7.02, 7.04 s | 5.58, 5.62 s | **4.80, 4.79 s** |
+| A turn of 5,000 tokens | 10.71, 10.75 s | 9.27, 9.30 s | **7.78, 7.80 s** |
+| A turn of 301 or 901 tokens | 1.40 to 3.41 s | 1.37 to 3.24 s | the same |
+| The 37K prompt read fresh | 36.1, 36.1 s | 34.9, 34.8 s | **33.6, 33.5 s** |
+| The agent benchmark's prompts (35 turns) | 107.5, 108.4 s | 90.2, 89.7 s | **79.4, 79.8 s** |
+| its answers, tok/s | 94.9, 97.4 | 92.1, 96.9 | 95.2, 96.2 |
+
+The RTX 3060 Laptop 6 GB with Qwen3.6 UD-Q4_K_M and the daily flags of 2026-10-25, `test_scripts/turn_read.py`,
+`test_scripts/agent_bench.py` and `test_scripts/run_serve.py`. A prompt read in one call without a checkpoint (a new
+conversation of up to 2,048 tokens) is not faster with it: 1,342 to 1,985 tokens took 0.03 to 0.07 s longer, as the
+loan costs about 0.1 s and a layer's worth more to copy. The answers move as much as between two runs without it:
+`test_scripts/quality.py` gave 1.07% and 1.20% of the steps' most likely token changed with it, 0.93% and 1.33%
+without, none that was 60% or more sure; the cache lends it 512 MiB, and the experts that leave it are computed from
+the staging buffer, which splits their sums another way (from free VRAM, with the cache untouched, it wrote the same
+tokens as without it). It needs one card that maps VRAM a piece at a time and MMQ for the experts' types (Qwen3.5 /
+3.6); it is off on several cards. Setup writes it from v0.5.0 on one NVIDIA card with 5 GB of VRAM or more
+(`poly_speedups()`), not under 5 GB, where the cache has next to nothing to lend and it was not run, nor on AMD cards
+or several cards. An install made before adds `"--stage-next"` to the `args` of the model's config (`--update` does
+not add new options); an engine built before step 15 stops at the unknown option, and setup leaves the option out of a
+config for such an engine and says so. Every number: [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md),
+step 15. Not tested: other cards, a 4 GB card, AMD (HIP), Linux, Ornith 1.5.

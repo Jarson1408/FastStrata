@@ -104,7 +104,8 @@ several times. A 32K prompt was read from its start in 37 to 40 s.
 - **What setup does.** On a card with 3 to 4.5 GB free its menu offers Q4 at 32K (from 26.1 GB of free RAM), Q3 at
   48K (from 20.6), Ornith APEX-I-COMPACT at 32K (from 21.8) and APEX-I-QUALITY at 24K (estimated, from 27.6), all with
   the 8-bit cache, and recommends the first one that runs 32K or more and fits your RAM. A card under 5 GB gets no
-  `--graph-experts` (one run of two stopped with it there, and it gave about 3%).
+  `--graph-experts` (one run of two stopped with it there, and it gave about 3%), and no `--stage-next` (its cache has
+  next to nothing to lend it, and it was not run there).
 - **From v0.4.0:** `--lend-staging`, which setup writes on one NVIDIA card, puts about a third of
   the experts in VRAM on such a card where none fitted: with Q4 and the 8-bit cache 11-19% faster without guesses
   ([step 13](docs/OPTIMIZATION_LOG.md)). It was measured with `--graph-experts` on, which setup leaves out here.
@@ -121,7 +122,7 @@ card, look at [PolyStrata](https://github.com/VecSzn/PolyStrata), the project Fa
 - **Linux with ROCm** (its development packages): setup compiles the engine, since the ready-made one in the release
   is for NVIDIA. The speedups on the processor apply (`--threads`, `--cpu-multi`, `--suffix-drafts`, the conversation
   cache); the ones on the card do not (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`,
-  `--lend-staging`).
+  `--lend-staging`, `--stage-next`).
   The attention cache stays in 16 bits, 22 KB a token instead of 11.7, so the same VRAM holds about half the context.
 - **Not measured** on any AMD card. Moving the card's speedups to HIP, or a measurement from an AMD card, is welcome:
   [docs/TEST_REQUESTS.md](docs/TEST_REQUESTS.md).
@@ -271,8 +272,8 @@ the test laptop, for UD-Q4_K_M at 144K:
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
---conversation-cache-slots 8 --prompt-cache-message 2048
+--elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
+--conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Each where the PC and the preset take it ([which PC gets which](docs/RESULTS.md#configuration)), and setup prints each

@@ -49,6 +49,7 @@ nie bardziej niż między dwoma przebiegami tej samej wersji.
 | 11 | `--prompt-cache-message 2048` | Punkt kontrolny tam, gdzie zaczyna się ostatnia wiadomość promptu, więc blok LODESTAR, który bramka dokleja na końcu każdego promptu, nie jest czytany od nowa z turą. | Z LODESTAR prompt tury 7,7 s zamiast 19,3 (11 541 tokenów czytanych na turę -> 2 640); bez niego te same 5,0 s. | Bezstratnie; bez LODESTAR kosztuje 0,16 s na prompt i tyle samo oszczędza. |
 | 12 | (pomiar) | Których ekspertów powinien trzymać cache: zapis routingu (`STRATA_ROUTE_TRACE`) i symulator reguł cache'u, sprawdzony z liczbami samego silnika. | Żadna reguła, która nie zna przyszłości, nie była lepsza od silnika o więcej niż 3%; tabele według rodzaju pracy (kod, dokumenty) nie pomogły. | |
 | 13 | `--lend-staging` | Bufor stagingu partii promptu (500 MiB) trzyma ekspertów cache'u, gdy pisana jest odpowiedź, i wraca przed następną partią. | Benchmark agenta 85,0 i 83,9 tok/s zamiast 82,1 i 82,0; na symulowanej karcie 4 GB jedna trzecia ekspertów z VRAM zamiast żadnego, 11–19% szybciej bez zgadywania. | Bezstratnie: jak między dwoma przebiegami bez niej. |
+| 15 | kawałki po 64 MiB; `--stage-next` | Eksperci warstwy kopiowani na kartę kawałkami, kopia hosta pod kopią karty (zawsze włączone); z `--stage-next` drugi bufor stagingu, który cache ekspertów pożycza na czas czytania promptu, a eksperci następnej warstwy kopiują się, gdy liczy się warstwa. | Tura agenta 1 501 tokenów po 38K czytana w 5,0 s z kawałkami i 3,9 s z `--stage-next` zamiast 6,4; prompty benchmarku agenta 90 i 79,6 s zamiast 108. | Kawałki: te same tokeny. `--stage-next`: jak między dwoma przebiegami bez niej. |
 
 `--tail-skip 6`, które pomija eksperta spoza VRAM, gdy każdy token okna stawia go na siódmym lub ósmym miejscu, to
 ustawienie PolyStrata dla Qwen3.6 i zostaje: x1,15 na tym samym tekście przy średniej KL 0,0060 (krok 6). Ornith 1.5
@@ -276,8 +277,8 @@ Setup zapisuje opcje silnika w konfiguracji uruchomienia modelu, `strata-<rodzin
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
---conversation-cache-slots 8 --prompt-cache-message 2048
+--elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
+--conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Każdą tam, gdzie komputer i preset ją przyjmują; setup wypisuje każdą razem z tym, co dała:
@@ -289,6 +290,7 @@ Każdą tam, gdzie komputer i preset ją przyjmują; setup wypisuje każdą raze
 | `--graph-experts` | jednej karcie NVIDIA od Volty wzwyż z co najmniej 5 GB VRAM; nie UD-Q3_K_M, którego ekspertów nie czyta |
 | `--elastic-prefill 1024` | jednej karcie NVIDIA |
 | `--lend-staging` | jednej karcie NVIDIA |
+| `--stage-next` | jednej karcie NVIDIA z co najmniej 5 GB VRAM |
 | `--suffix-drafts 256` | komputerowi z RAM, którego według szacunku setupu preset potrzebuje |
 | `--cpu-multi` | procesorowi z AVX2 i presetowi z ekspertami K-quant (nie UD-Q3_K_M) |
 | `--kv-q8`, `--prompt-batch 512` | NVIDIA, gdy żądany kontekst nie mieści się na karcie w 16 bitach; setup pyta |

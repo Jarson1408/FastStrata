@@ -1528,6 +1528,260 @@ CPU moves the sums a little, as the swaps already do. Writing the same text: 65.
   of 8 GB or more, AMD (HIP maps VRAM a piece at a time too), Linux, Ornith 1.5, contexts past 37K on the whole card,
   several cards (it is off there).
 
+## 14. Where a turn's prompt reading goes (2026-10-25, kv-q8 1b1935a4, the v0.4.0 engine; no engine change)
+
+Reading prompts was 43% of the wait in the real sessions of 21 to 23.10, and nobody had looked at where that time goes.
+Everything here is the engine of the daily install (`build-poly\strata-poly.exe`, kv-q8 d320b89e, the v0.4.0 engine's
+source) with the daily config of 2026-10-25: `--max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8
+--attn-split --graph-experts --elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi
+--conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048`, a fresh copy of the pack's
+expert profile every run.
+
+**The workloads.** `test_scripts/agent_bench.py run` (the 35 answers of step 7's OpenCode-like session): **the prompts
+took 109.2 s and the answers 64.1 s**, 63% of the time reading. By the tokens a turn read:
+
+| Tokens read a turn | Turns | Each (median) | All |
+| --- | ---: | ---: | ---: |
+| 22 to 40 | 9 | 0.28 s | 2.9 s |
+| 197 to 431 | 10 | 1.23 s | 12.8 s |
+| 592 to 823 | 4 | 3.26 s | 13.2 s |
+| 1,545 to 4,100 | 8 | 5.60 s | 45.4 s |
+| 7,466 and 9,349 | 4 | 8.50 s | 34.8 s |
+
+`test_scripts/trace_run.py` with step 12's `day` prompts, now with `--lend-staging`, read as in step 12: 1,183 tokens in
+5.1 s, 1,342 in 5.1, 1,682 and 1,976 in 5.2, 2,460 in 5.7 and 5.8, 3,749 in 6.3, 7,194 in 8.9, 9,687 in 10.5, 13,943 in
+13.7, 37,433 in 36.5 (all fresh): about 4.3 s a read and 0.67 s a thousand tokens.
+
+A turn as an agent's session sends it: `test_scripts/turn_read.py` (new) reads `prompt-engine-37k.ids` and then grows
+it a tool answer at a time (100, 300, 600, 900, 1,500, 2,500 and 5,000 tokens of source), so that each turn is taken
+up at the checkpoint before the prompt's last token and reads its new tokens, at 37.5K to 48K tokens of context. Each
+setting twice, the settings in turns; seconds the prompt took (the engine's DONE line):
+
+| Read | Daily | `--elastic-prefill 512 --stage-ahead 512` | `--prompt-batch 1024` | `--cpu-share 0` | `0.25` | `0.5` | `0.75` | `--elastic-prefill 0` |
+| ---: | --- | --- | --- | --- | --- | --- | --- | --- |
+| 37,433 (fresh) | 36.4, 36.5 | 36.5, 36.5 | 36.6, 36.5 | 36.6, 36.5 | 36.5, 36.5 | | | 47.4, 47.4 |
+| 101 | 0.82, 0.82 | 0.87, 0.85 | 0.86, 0.85 | 2.42, 2.43 | 1.95, 1.96 | 1.49, 1.49 | 1.01, 1.00 | 0.84, 0.92 |
+| 301 | 1.53, 1.50 | 1.52, 1.53 | 1.51, 1.54 | 3.76, 3.77 | 3.07, 3.05 | 2.36, 2.37 | 1.48, 1.47 | 1.50, 1.50 |
+| 601 | 2.74, 2.58 | 5.06, 4.97 | **2.21, 2.23** | 6.85, 6.85 | 5.63, 5.57 | 4.25, 4.26 | 2.76, 2.77 | 2.64, 2.58 |
+| 901 | 3.39, 3.32 | 5.30, 5.30 | 3.28, 3.33 | 8.35, 8.35 | 6.89, 6.87 | 5.25, 5.26 | 3.30, 3.35 | 3.30, 3.34 |
+| 1,500 | 5.37, 5.37 | 5.38, 5.38 | 5.39, 5.41 | 5.38, 5.38 | 5.37, 5.38 | | | 6.06, 6.04 |
+| 2,500 | 7.88, 7.89 | 7.91, 7.89 | 7.93, 7.93 | 7.89, 7.88 | 7.89, 7.88 | | | 8.03, 8.06 |
+| 5,000 | 9.52, 9.50 | 9.49, 9.52 | 9.53, 9.55 | 9.52, 9.50 | 9.50, 9.49 | | | 11.61, 11.60 |
+
+- A read of 1,000 tokens or more costs about 4 s before its tokens count, whatever the context: the 1,500 tokens after
+  39K took 5.4 s, 1,183 fresh ones in the `day` run 5.1.
+- `--elastic-prefill 512` (with `--stage-ahead 512`, without which a read under 1,024 tokens is not widened) is 2 s
+  slower at 600 and 900 tokens: such a read then copies every layer's experts that are not cached, where the daily
+  setting's calls of 512 leave three quarters of them to the CPU. Off (`0`), the long reads are slower (37K +11 s,
+  5,000 tokens +2.1 s). 1,024 stays.
+- `--cpu-share`: the share the engine finds by itself is as good as the best fixed one (0.75 at 300 to 900 tokens,
+  more at 100); 0, 0.25 and 0.5 are slower. With the CPU's help a 900-token read takes 3.3 s, without it 8.4. Nothing
+  to tune.
+- A read of 513 to 1,023 tokens is two calls (`--prompt-batch 512`), each copying and computing its experts; one call
+  (`--prompt-batch 1024`, which holds 0.7 GB of VRAM for good) took 0.45 s off 600 tokens and nothing off 900.
+
+**The profile** (Nsight Systems 2025.3.2, `nsys profile -t cuda --cuda-graph-trace=node --cuda-flush-interval=500 -s
+none`, run around `turn_read.py` because nsys on Windows does not hand the engine its stdin; without the flush interval
+CUPTI dropped 138,194 records after 54 s; `test_scripts/nsys_turn.py` cuts the profile at each turn's prompt time). The
+profiler adds 0 to 15% (1,501 tokens: 6.16 s against 5.37). Seconds of the prompt's time, after 37.4K to 39.8K tokens:
+
+| | 301 read | 901 read | 1,501 read | 2,501 read |
+| --- | ---: | ---: | ---: | ---: |
+| The prompt's time | 1.54 | 3.54 | 6.16 | 6.82 |
+| Copies to the card with no kernel running | 0.55 | 1.31 | 2.91 | 2.86 |
+| bytes copied to the card | 4.0 GB | 8.9 GB | 20.1 GB | 20.9 GB |
+| Kernels with no copy running | 0.42 | 1.04 | 1.81 | 2.60 |
+| of them the attention (cuBLAS products over the cache, softmax, Q8 to halves) | 0.16 | 0.43 | 0.79 | 1.39 |
+| MMQ (the experts' products) | 0.09 | 0.22 | 0.56 | 0.73 |
+| DeltaNet (the gated delta rule's state) | 0.05 | 0.14 | 0.23 | 0.39 |
+| the router and other small f32 products (`gemm_small_kernel`) | 0.03 | 0.09 | 0.13 | 0.22 |
+| Copies and kernels at once | 0.04 | 0.03 | 0.10 | 0.27 |
+| The card idle | 0.55 | 1.19 | 1.34 | 1.07 |
+| Copies to the host (checkpoints, a call's rows) | 0.04 | 0.03 | 0.12 | 0.16 |
+
+- **From 1,024 tokens a read copies every layer's uncached experts through the staging buffer**: 18.7 GB of the 20.1 at
+  1,501 tokens (465 to 483 MB a layer), at 6.7 GB/s, which is what PCIe 3.0 x8 gives. 2.8 s, and nothing runs beside it.
+- A layer takes about 140 ms: its experts are copied from the mapped file into the pinned staging memory on the host
+  (42 ms, 11 GB/s, on the engine's thread while the card waits: the card's idle time), then copied to the card (70 ms),
+  then the layer's products run (25 to 55 ms). The next layer's copy starts after them: the copy ahead waits for the
+  staging buffer, which the layer's products read. `kChunkBytes` (`src/poly/runtime.hpp`) is 512 MiB, a whole layer, so
+  the host's copy and the card's never overlap within a layer either.
+- Under 1,024 tokens a call copies only the experts the CPU does not take: the CPU computed about three quarters of the
+  uncached ones (`STRATA_CPU_STATS`: 53 GiB in 4.9 to 5.1 s for the six calls of 100 to 900 tokens, 11 GB/s), and the
+  card was idle a third of the time, waiting for it.
+- The 37,433 tokens fresh: the card busy 96% (MMQ 10.2 s, attention 9.8, DeltaNet 6.3, `gemm_small_kernel` 3.5, copies
+  to the card with nothing else 3.3 s).
+- Small fixed costs: taking a conversation up at a checkpoint (its 66 MB state to the card) about 10 ms; from the GEN
+  line to RESUME 12 ms (median of 14 turns; under the profiler 62 ms); `--elastic-prefill`'s loan 29 to 45 ms and its
+  return (`narrow()`: the lent experts uploaded again before the answer) 146 to 184 ms a read of 1,024 tokens or more;
+  `--lend-staging`'s return (`end_loan()`) 3.5 to 4.4 ms; a parked conversation back from RAM 10 to 130 ms (the daily
+  log).
+
+**The server** (`test_scripts/server_cost.py`, new: `Service.encode_prompt()` of `serve/server.py`, the chat template
+and the tokenizer, for an agent conversation of tool answers): 9,430 tokens 6 ms, 39,558 tokens 22 ms (40 ms with the
+tokenizer's cache of pieces empty), 70,000 tokens 40 ms (62). The template is 0 to 2 ms of it. Nothing to take there.
+
+**Reads from zero in the real sessions** (the daily install's logs of 21 to 23.10: the server's "reading the prompt:
+X of Y tokens" lines, the engine's `--elastic-prefill` and conversation cache lines, the FastStrata Gateway's events
+from 21.10 20:11 on; 149 turns). Reading took about 1,380 s in all, 278 s of it (20%) in prompts read from their
+first token:
+
+| Why from zero | Turns | Prompt tokens | Time | Of the 278 s |
+| --- | ---: | --- | ---: | ---: |
+| the engine started again (the Gateway or the PC restarted) and the conversation went on: the conversation cache was empty | 3 | 14,128, 43,176, 69,554 | 166 s | 60% |
+| a new OpenCode session (system prompt, 12 tools, the first message), or, before the Gateway's log began, a prompt that began unlike the others | 6 | 9,662 to 10,845 | 70 s | 25% |
+| the second prompt after a restart with LODESTAR on began otherwise than the first (its frame went from 3,308 to 3,000 characters; the dumps were gone, so where is not known) | 1 | 43,423 | 44 s | 16% |
+
+No conversation was pushed out of the conversation cache. The other long rereads did not start from zero: with
+LODESTAR on every turn went back to an old checkpoint (step 11 fixed that, v0.3.0), and with it off a few times a
+session OpenCode cut old tool results out of the conversation (the prompt shrank, 33,175 -> 32,243 and 58,587 ->
+52,213 tokens); on 22.10 at 18:59 the engine went back to 9,675 (the end of the session's first prompt, in a parked
+copy) and read 42,537 tokens, 78 s.
+
+**What it points to** (estimates from the profile, none built or measured):
+
+- Copy each layer's experts to the host's pinned memory in pieces (`kChunkBytes` 512 MiB -> about 64 MiB), so that the
+  host's copy of a piece runs under the card's copy of the one before: about 36 ms a layer, **1.0 to 1.4 s a read of
+  1,024 tokens or more** (1,500 tokens 5.4 -> about 4.1 s), the same bits, and 0.9 GiB less pinned memory.
+- A second staging buffer in VRAM while a prompt is read (lent by the expert cache, as `--elastic-prefill` lends its
+  batch), so that the next layer's experts are copied while this layer computes: the read then takes about as long
+  as its copies, **with the first change 1,500 tokens about 3.2 to 3.5 s and 2,500 about 4.5 to 5 s** (-40%), the same
+  bits. The agent benchmark's 109 s of reading would be about 75 s.
+- The attention of a prompt batch writes every score to VRAM (cuBLAS products and a softmax): 13 to 20% of a turn
+  after 40K, 27% of a fresh 37K read. A fused kernel would read the cache once; the sums move a little, as with
+  `--attn-split` (to be checked with `test_scripts/quality.py`).
+- `narrow()`'s upload in the background, as `--lend-staging`'s swaps: 0.15 to 0.18 s a read of 1,024 tokens or more.
+- Parked conversations kept on disk across an engine restart: 60% of the time read from zero in these logs (a 69,554-
+  token conversation read again in 108 s).
+- A checkpoint kept where the system prompt ends, which a new session of the same project could be taken up at: up
+  to 25% of the time read from zero (about 11 s a new session), only while another session with the same system
+  prompt and tools is parked; whether OpenCode's sessions share them (its system prompt has the date) is not known
+  without dumps.
+- Not worth it: `--elastic-prefill 512`, another `--cpu-share`, the server's own work (22 to 40 ms a turn), the GEN
+  line (12 ms). One call for 513 to 1,023 tokens: 0.45 s at 600, nothing at 900.
+
+Not measured: a real OpenCode session replayed (the user chose not to dump prompts), Ornith 1.5, other cards, Linux.
+
+## 15. A layer's experts copied in pieces, and the next layer's while this one runs: `--stage-next` (2026-10-25, branch `poly/stage-overlap`)
+
+**Why the card waited.** Step 14 found the card idle while the host copied a layer's experts into pinned memory. The
+profile shows why the host's copy never ran under anything: a turn that is taken up at a checkpoint has a mark where
+the reply's turn begins (`--prompt-cache-message`, the server's `turn_at`), so `read()` takes every layer in two calls,
+some 1,490 tokens and 11, and after the first one waits for the card to finish the layer (`cudaStreamSynchronize`,
+77 ms in the 1,501-token turn) to save its state for the checkpoint. The second call then waits for its routing,
+which is behind the layer on the card. So the engine's thread came to the next layer's copy only when the card was
+done, and a layer took the host's copy (36 to 42 ms), then the upload (71 ms), then the products and the small call.
+Within a layer the two copies did not overlap either: `kChunkBytes` was 512 MiB, more than a layer's 465 MB.
+
+**What changed.**
+
+1. **In pieces (the default).** `kChunkBytes` (`src/poly/runtime.hpp`) is 64 MiB: the workers copy the next piece of
+   the layer into one pinned buffer while the other uploads, so the upload starts after the first 64 MiB and the
+   host's copy runs under it. Only the order of the copies changes; the pinned staging memory is 0.9 GiB smaller
+   (2 x 64 MiB). `Engine::stage()` became `put()`, which takes the staging buffer, the pinned pair (`Pinned`), the
+   stream and the workers, so that a second copier can use it.
+2. **`--stage-next` (opt-in).** A read of `--stage-ahead` tokens or more (1,024) gets a second staging buffer for the
+   read (`Engine::lend_next()`): VRAM free above what `mind_vram()` keeps, else the expert cache's end, whose experts
+   used least leave the cache (`shrink_cache()`), the same VRAM moved to the buffer's addresses as `--lend-staging`
+   does. At a layer's first call that copies ahead, a thread of its own (with four workers, its own pinned pair and
+   stream) copies the next layer's experts that are not cached (`plan_ahead()`) into the buffer this layer does not
+   read, its upload waiting for the calls before to have read that buffer (`send_next()`); the next layer takes that
+   buffer when it holds the experts `plan_ahead()` lists then (`take_next()`), and the card waits for the upload at the
+   round it holds. After the read the buffer's VRAM goes back to the cache's end with the experts that left it
+   (`end_next()`). One card that maps VRAM a piece at a time, MMQ (Qwen3.5 / 3.6). A first version started a thread a
+   layer: the same times, but CUPTI ran out of buffers under Nsight Systems (115,500 records dropped); the thread is now
+   started once and given a copy at a time.
+
+**Same tokens.** The default path wrote v0.4.0's 96 tokens after the 2K prompt (`run_serve.py`, `--threads 8
+--tail-skip 0 --expert-swaps 0 --vram-reserve-mib 1024`, md5 c2c344182a39589d07f590676a43f019 in four runs of the new
+build and two of v0.4.0's, the builds in turns, and once more after the thread change), and read it in 4.3 s where
+v0.4.0 took 5.7. With `--stage-next` the same run read in 3.6 s and wrote other tokens from the 8th on, the same in
+three runs: the cache lent it 540 MiB (541 -> 247 experts), and the experts that left are computed in a staging round
+instead of a run of cached slots, which splits their sums another way (as `--elastic-prefill` does). A build that
+took the second buffer from free VRAM only (the cache untouched; a test edit, not kept) wrote v0.4.0's tokens with
+`--stage-next`, read in 3.4 s: the copies ahead hold what the layers would have copied.
+
+**Measured** on the RTX 3060 Laptop 6 GB, UD-Q4_K_M, the daily flags of 2026-10-25 (as step 14), a fresh copy of the
+expert profile every run; old = v0.4.0's engine (kv-q8 d320b89e, `build-v040`), new = this build (`build-s15`) with
+the same flags, and with `--stage-next`; the three in turns, each twice.
+
+`test_scripts/turn_read.py --turns 300,900,1500,2500,5000` (the 37K conversation read fresh, then a tool answer at a
+time, each turn taken up at the checkpoint before the prompt's last token), seconds the prompt took:
+
+| Read | Old | New | New, `--stage-next` |
+| ---: | --- | --- | --- |
+| 37,433 (fresh) | 36.38, 36.39 | 34.94, 35.04 | **33.73, 33.73** |
+| 301 | 1.47, 1.40 | 1.39, 1.37 | 1.41, 1.36 |
+| 901 | 3.41, 3.32 | 3.24, 3.24 | 3.24, 3.24 |
+| 1,501 | 6.40, 6.39 | 4.97, 4.97 | **3.88, 3.86** |
+| 2,500 | 7.02, 7.04 | 5.58, 5.62 | **4.80, 4.79** |
+| 5,000 | 10.71, 10.75 | 9.27, 9.30 | **7.78, 7.80** |
+
+The build with the thread started once, a third run of `--stage-next`: 33.65, 1.46, 3.31, 3.88, 4.77, 7.82 s.
+
+`test_scripts/agent_bench.py run` (35 answers; `--lend-staging --suffix-drafts 256 --cpu-multi --prompt-cache-message
+2048` beside the script's flags):
+
+| | Old | New | New, `--stage-next` |
+| --- | --- | --- | --- |
+| The prompts | 107.5, 108.4 s | 90.2, 89.7 s | **79.4, 79.8 s** |
+| of them the 12 of 1,024 tokens or more | 79.9, 79.6 s | 62.6, 63.1 s | 53.1, 53.1 s |
+| the 4 of 500 to 1,023 | 12.0, 12.0 s | 11.9, 11.9 s | 11.8, 11.7 s |
+| The answers, tok/s | 94.9, 97.4 | 92.1, 96.9 | 95.2, 96.2 |
+| All 35, wall | 171, 172 s | 156, 155 s | 142, 145 s |
+
+`test_scripts/run_serve.py` with the 37K prompt and 250 tokens, read fresh: 36.1, 36.1 s -> 34.9, 34.8 -> **33.6,
+33.5** with `--stage-next`; writing 67.6, 65.7 -> 70.9, 70.8 -> 69.1, 67.6 tok/s (30.0 to 32.2 ms a window in all
+six), 56.3 to 57.7% of the experts from VRAM in all six.
+
+The `--stage-next` reads in these runs: the cache lent 436 to 512 MiB in 2 to 20 ms and had its experts again in 77 to
+90 ms; at the 5,000-token turn it had only 244 MiB left beside `--elastic-prefill`'s loan, the rest of the buffer came
+from the VRAM kept free, and it was back in 49 ms. Every layer after the first took the copy made for it (39 of 39,
+none for nothing).
+
+**The profile** (`nsys profile -t cuda --cuda-graph-trace=node --cuda-flush-interval=500 -s none` around
+`turn_read.py --turns 900,1500,2500`, as in step 14; `test_scripts/nsys_turn.py --prompt`). Seconds of the 1,501-token
+turn (after 38.3K) and the 2,501-token one; old is step 14's profile:
+
+| | Old | New | New, `--stage-next` |
+| --- | ---: | ---: | ---: |
+| 1,501 tokens: the prompt's time | 6.16 | 4.72 | 3.88 |
+| the card busy | 79% | 97% | 97% |
+| the card idle | 1.34 | 0.15 | 0.12 |
+| copies to the card | 20.1 GB, 3.01 | 20.1 GB, 3.01 | 21.2 GB, 3.17 |
+| copies with no kernel running | 2.91 | 2.65 | 1.80 |
+| kernels with no copy running | 1.81 | 1.56 | 0.55 |
+| copies and kernels at once | 0.10 | 0.36 | **1.38** |
+| 2,501 tokens: the prompt's time | 6.82 | 5.38 | 4.79 |
+| copies and kernels at once | 0.27 | 0.89 | **1.62** |
+
+The pieces took the card's idle time away (the host's copy now runs under the upload); `--stage-next` puts most of the
+products under the next layer's upload. A turn of 1,000 tokens or more is now about as long as its copies: 3.17 s of
+the 3.88, 1.1 GB more than without it, the cache's lent 512 MiB and their way back.
+
+**What the answers cost** (`test_scripts/quality.py`, tail skip 0, `--cpu-multi --lend-staging`, the new build without
+and with `--stage-next` in turns): the most likely token changed at 0.93% and 1.33% of the 1,500 steps without, 1.07%
+and 1.20% with, none where the reference was 60% or more sure; mean KL 0.00322, 0.00335 against 0.00356, 0.00320; the
+reference's perplexity 1.1766, 1.1773 against 1.1777, 1.1766. As between two runs without it. Its prompts are read
+fresh, and there `--stage-next` gave nothing where the read is one call: 1,342 tokens 3.30 and 3.28 s against 3.37 and
+3.34, 1,716 tokens 3.39, 3.37 against 3.41, 3.41, 1,985 tokens 3.44, 3.44 against 3.49, 3.49 (`--elastic-prefill`
+takes them in one call of 1,536 to 2,048, the engine's thread does not wait between layers, and the products of a
+short context are small beside the loan's cost: 0.1 s and a layer's worth more to copy). It paid where the read is two
+calls (a checkpoint every 2,048 tokens): 2,460 tokens 3.91, 3.90 -> 3.66, 3.53 s, 3,749 tokens 4.52, 4.53 -> 3.58,
+3.57.
+
+- **The pieces** take 1.4 s off a read of 1,024 tokens or more after a long conversation (1,501 tokens 6.4 -> 5.0 s,
+  2,500 7.0 -> 5.6, 5,000 10.7 -> 9.3), 1.2 to 1.4 s off a fresh 37K read, 17% off the agent benchmark's prompts, and
+  write the same tokens. Reads under 1,024 tokens go another way (the CPU computes most of their uncached experts):
+  about 0.1 s faster.
+- **`--stage-next`** takes another 1.1 s off the 1,501-token turn (4.97 -> 3.87 s, 40% off v0.4.0's 6.4), 0.8 s off
+  2,500, 1.5 s off 5,000, 1.2 to 1.3 s off the fresh 37K and 10 s more off the agent benchmark's prompts (90 -> 79.6 s, 26% off
+  v0.4.0's 108); the answers are written as fast. It moves the answers as much as two runs move without it. A read in
+  one call without a checkpoint (a new conversation of up to 2,048 tokens) is not faster with it.
+- Not done: setup does not write `--stage-next` (it is the user's choice), nor is it in the daily install. Not tested:
+  other cards, a 4 GB card (where the cache has little to lend: the buffer then comes from VRAM below the reserve, as
+  in the 5,000-token turn), AMD (HIP), Linux, Ornith 1.5, several cards (it is off there).
+
 ## Where it stands
 
 | | Before (16 threads, 2026-10-18) | Now (step 8) |
@@ -1542,6 +1796,8 @@ CPU moves the sums a little, as the swaps already do. Writing the same text: 65.
 | Reading 37,433 tokens | 47 s (793 tok/s) | 36 s (1,040 tok/s) |
 | Reading 139k tokens | about 270 s at 150k (2026-10-17) | 245.7 s |
 | A prompt a turn of an OpenCode session of 46K to 71K, the Gateway's LODESTAR on | | 19.2 -> 7.7 s with `--prompt-cache-message 2048` (step 11, opt-in) |
+| A turn of 1,501 tokens after 38K, taken up at a checkpoint | | 6.4 s (v0.4.0) -> 5.0 s, 3.9 with `--stage-next` (step 15, opt-in) |
+| The agent benchmark's prompts | | 108 s (v0.4.0) -> 90 s, 79.6 with `--stage-next` (step 15) |
 
 Where the time goes now after a long prompt (2026-10-19, after step 7): Nsight Systems, 5 s of writing after the
 139,056-token prompt (`test_scripts/make_prompt.py 139000`), the daily flags. 10.9% of the experts came from VRAM.

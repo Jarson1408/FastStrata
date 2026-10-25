@@ -34,7 +34,8 @@ FORK_USAGE = (b"usage: strata-poly --model FILE.gguf\n  --threads N   CPU thread
               b"  --kv-q4   Qwen3.5 / 3.6\n  --kv-q4-keys q8|q4\n"
               b"  --attn-split  ...\n  --graph-experts  ...\n  --prompt-batch N\n  --elastic-prefill N\n"
               b"  --elastic-batch N\n  --conversation-cache-mib N\n  --conversation-cache-slots N\n  --tail-skip N\n"
-              b"  --prompt-cache-message N\n  --lend-staging  Qwen3.5 / 3.6 on one card\n\0"
+              b"  --prompt-cache-message N\n  --lend-staging  Qwen3.5 / 3.6 on one card\n"
+              b"  --stage-next  Qwen3.5 / 3.6 on one card\n\0"
               b"--attn-split\0--kv-q8\0")
 UPSTREAM_USAGE = (b"usage: strata-poly --model FILE.gguf\n  --threads N\n  --kv-whole\n  --kv-q8x\n  --kv-q4-old\n"
                   b"  --attn-split-old\n"
@@ -48,7 +49,7 @@ LAPTOP = {"cards": [("NVIDIA GeForce RTX 3060 Laptop GPU", 6144, "86")], "ram": 
 DAILY = ["--max-context", "147456", "--conversation-cache-mib", "12288", "--tail-skip", "6", "--kv-q8",
          "--prompt-batch", "512", "--attn-split", "--threads", "8", "--conversation-cache-slots", "8", "--graph-experts",
          "--elastic-prefill", "1024", "--suffix-drafts", "256", "--cpu-multi", "--prompt-cache-message", "2048",
-         "--lend-staging"]
+         "--lend-staging", "--stage-next"]
 # a 32 GB laptop with an 8 GB card and an Intel CPU of 6 performance cores (two threads each) and 8 efficiency cores
 HYBRID = {"cards": [("NVIDIA GeForce RTX 4060 Laptop GPU", 8188, "89")], "ram": 31.7, "avx2": True,
           "threads": (14, 20), "hybrid": (6, 8), "win": True}
@@ -76,7 +77,7 @@ NO_AVX2 = {"cards": [("NVIDIA GeForce RTX 3060", 12288, "86")], "ram": 47.9, "av
 PATHS = ("--model", "--expert-profile", "--draft-model")
 CUDA_ONLY = ("--attn-split", "--graph-experts", "--elastic-prefill", "--kv-q8", "--kv-q4")
 NEW = CUDA_ONLY + ("--threads", "--suffix-drafts", "--cpu-multi", "--prompt-batch", "--conversation-cache-slots",
-                   "--prompt-cache-message", "--lend-staging")
+                   "--prompt-cache-message", "--lend-staging", "--stage-next")
 UNSUPPORTED = ("tiel", "gemma4", "glm", "deepseek")             # strata-poly's; the Strata engine's: test_setup_menu
 
 
@@ -223,7 +224,7 @@ class Rule(unittest.TestCase):
         self.assertEqual(setup.hybrid_pool_workers(HYBRID["hybrid"]), 9)
         self.assertEqual(got, {"--attn-split": None, "--graph-experts": None, "--elastic-prefill": "1024",
                                "--suffix-drafts": "256", "--cpu-multi": None, "--prompt-cache-message": "2048",
-                               "--lend-staging": None})
+                               "--lend-staging": None, "--stage-next": None})
         self.assertEqual(notes, [])
 
     def test_16_gb(self):
@@ -244,7 +245,7 @@ class Rule(unittest.TestCase):
         self.assertEqual(got, {"--threads": "16", "--suffix-drafts": "256", "--cpu-multi": None,
                                "--conversation-cache-slots": "8"})
         self.assertTrue(any("neither built nor run for AMD" in n for n in notes), notes)
-        self.assertIn("--prompt-cache-message and --lend-staging left out: measured on NVIDIA cards only", notes)
+        self.assertIn("--prompt-cache-message, --lend-staging and --stage-next left out: measured on NVIDIA cards only", notes)
 
     def test_pascal_gets_no_attn_split(self):
         got, notes, _plan, _m = rule(PASCAL)
@@ -262,6 +263,7 @@ class Rule(unittest.TestCase):
         self.assertNotIn("--graph-experts", got)
         self.assertNotIn("--elastic-prefill", got)
         self.assertNotIn("--lend-staging", got)
+        self.assertNotIn("--stage-next", got)
         self.assertIn("--attn-split", got)
         self.assertTrue(any("they run on one card" in n for n in notes), notes)
 
@@ -284,8 +286,36 @@ class Rule(unittest.TestCase):
         for machine in (TWO, AMD):
             got, notes, _plan, _m = rule(machine, model="UD-Q4_K_M")
             self.assertNotIn("--lend-staging", got)
-            self.assertTrue(any("--lend-staging left out" in n for n in notes), notes)
+            self.assertTrue(any("--lend-staging" in n and "left out" in n for n in notes), notes)
         self.assertNotIn("--lend-staging", rule(LAPTOP, model="UD-Q4_K_M", mode="off")[0])
+
+    def test_stage_next_on_one_nvidia_card_of_5_gb_or_more(self):
+        # step 15: a second staging buffer the expert cache lends a prompt's read, measured on the 6 GB laptop; the
+        # engine checks VMM and MMQ itself, as for --elastic-prefill.  Under 5 GB the cache has next to nothing to
+        # lend, and that was not run
+        for name, machine, model in (("the laptop", LAPTOP, "UD-Q4_K_M"), ("the laptop, Q3", LAPTOP, "UD-Q3_K_M"),
+                                     ("a 12 GB card", PC16, None), ("an 8 GB laptop", HYBRID, None),
+                                     ("Pascal", PASCAL, None), ("no AVX2", NO_AVX2, "UD-Q4_K_M")):
+            with self.subTest(name):
+                got, notes, _plan, _m = rule(machine, model=model)
+                self.assertIn("--stage-next", got)
+                self.assertIsNone(got["--stage-next"])             # a switch
+                self.assertFalse(any("--stage-next" in n for n in notes), notes)
+        self.assertIn("--stage-next", rule(LAPTOP, model="APEX-I-COMPACT", family="ornith")[0])
+        card5 = {**CARD4, "cards": [("NVIDIA GeForce RTX 3050 Laptop GPU (5 GB)", 5120, "86")]}
+        self.assertIn("--stage-next", rule(card5, model="UD-Q4_K_M")[0])
+        for model in ("UD-Q4_K_M", "UD-Q3_K_M"):
+            got, notes, _plan, _m = rule(CARD4, model=model)
+            self.assertNotIn("--stage-next", got, model)
+            self.assertIn("--lend-staging", got, model)
+            self.assertTrue(any(n.startswith("--stage-next left out: this card has 4 GB of VRAM") for n in notes),
+                            notes)
+        # several cards and AMD do not, and say why; --speedups off writes none
+        for machine in (TWO, AMD):
+            got, notes, _plan, _m = rule(machine, model="UD-Q4_K_M")
+            self.assertNotIn("--stage-next", got)
+            self.assertTrue(any("--stage-next left out" in n for n in notes), notes)
+        self.assertNotIn("--stage-next", rule(LAPTOP, model="UD-Q4_K_M", mode="off")[0])
 
     def test_no_avx2(self):
         got, notes, _plan, _m = rule(NO_AVX2, model="UD-Q4_K_M")
@@ -558,8 +588,9 @@ class Install(unittest.TestCase):
         mine = daily_file()
         if mine is not None:                                        # the laptop's own file, read only
             daily = options(json.loads(mine.read_text(encoding="utf-8-sig"))["args"])
-            later = {k: v for k, v in (("--prompt-cache-message", "2048"), ("--lend-staging", None))   # steps 11 and
-                     if k not in daily}                                                                   # 13 came after it
+            later = {k: v for k, v in (("--prompt-cache-message", "2048"), ("--lend-staging", None),   # steps 11,
+                                       ("--stage-next", None))                                  # 13 and 15 came
+                     if k not in daily}                                                             # after it
             self.assertEqual(options(cfg["args"]), {**daily, **later})
 
     def test_the_q3_preset_gets_neither_cpu_multi_nor_graph_experts(self):
@@ -586,7 +617,9 @@ class Install(unittest.TestCase):
         self.assertNotIn("--graph-experts", got)
         self.assertTrue({"--threads", "--attn-split", "--elastic-prefill", "--cpu-multi", "--kv-q8",
                          "--lend-staging"} <= set(got), got)
+        self.assertNotIn("--stage-next", got)
         self.assertIn("--graph-experts left out: this card has 4 GB of VRAM", out)
+        self.assertIn("--stage-next left out: this card has 4 GB of VRAM", out)
 
     def test_the_laptop_takes_the_8_bit_cache_without_being_asked(self):
         """FASTSTRATA UX: 144K in 8 bits is the 6 GB laptop's measured setting, not a question, and the laptop is
@@ -621,10 +654,11 @@ class Install(unittest.TestCase):
     def test_an_engine_of_upstream_source_gets_none_of_them(self):
         code, out, cfg = self.laptop(engine=UPSTREAM_USAGE)
         self.assertEqual(code, 0, out)
-        for flag in CUDA_ONLY + ("--suffix-drafts", "--cpu-multi", "--lend-staging"):
+        for flag in CUDA_ONLY + ("--suffix-drafts", "--cpu-multi", "--lend-staging", "--stage-next"):
             self.assertNotIn(flag, cfg["args"])
         self.assertEqual(options(cfg["args"])["--threads"], "8")      # the ones it has stay
-        self.assertIn("--attn-split --graph-experts --elastic-prefill --lend-staging --suffix-drafts --cpu-multi", out)
+        self.assertIn("--attn-split --graph-experts --elastic-prefill --lend-staging --stage-next --suffix-drafts "
+                      "--cpu-multi", out)
 
     def test_a_hybrid_laptop(self):
         code, out, cfg = self.install(HYBRID)
@@ -636,7 +670,7 @@ class Install(unittest.TestCase):
                                                 "--attn-split": None, "--graph-experts": None,
                                                 "--elastic-prefill": "1024", "--suffix-drafts": "256",
                                                 "--cpu-multi": None, "--prompt-cache-message": "2048",
-                                                "--lend-staging": None})
+                                                "--lend-staging": None, "--stage-next": None})
 
     def test_16_gb(self):
         code, out, cfg = self.install(PC16)
@@ -644,7 +678,8 @@ class Install(unittest.TestCase):
         self.assertEqual(cfg["model_name"], "qwen3.6-35b-a3b-ud-q3_k_m")
         self.assertEqual(options(cfg["args"]), {"--max-context": "147456", "--tail-skip": "6", "--threads": "6",
                                                 "--attn-split": None, "--elastic-prefill": "1024",
-                                                "--prompt-cache-message": "2048", "--lend-staging": None})
+                                                "--prompt-cache-message": "2048", "--lend-staging": None,
+                                                "--stage-next": None})
         self.assertIn("--suffix-drafts left out", out)
         self.assertIn("--graph-experts left out: this size's experts are IQ3_XXS", out)
 
@@ -658,7 +693,7 @@ class Install(unittest.TestCase):
                                                 "--tail-skip": "6", "--threads": "16", "--suffix-drafts": "256",
                                                 "--cpu-multi": None, "--conversation-cache-slots": "8",
                                                 "--kv-whole": None})
-        self.assertIn("--prompt-cache-message and --lend-staging left out: measured on NVIDIA cards only", out)
+        self.assertIn("--prompt-cache-message, --lend-staging and --stage-next left out: measured on NVIDIA cards only", out)
 
     def test_two_cards(self):
         code, out, cfg = self.install(TWO, ["--gpus", "0,1"])
@@ -668,6 +703,7 @@ class Install(unittest.TestCase):
         self.assertNotIn("--graph-experts", got)
         self.assertNotIn("--elastic-prefill", got)
         self.assertNotIn("--lend-staging", got)
+        self.assertNotIn("--stage-next", got)
         self.assertIn("--attn-split", got)
         self.assertIn("they run on one card", out)
 

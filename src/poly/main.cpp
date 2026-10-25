@@ -855,6 +855,10 @@ void usage() {
                  "                         of them are copied after the layer has routed\n"
                  "  --stage-ahead N        from N tokens, a batch copies those experts before it routes (default 1024,\n"
                  "                         0 = never)\n"
+                 "  --stage-next           Qwen3.5 / 3.6 on one card: a prompt of that many tokens or more gets a\n"
+                 "                         second such buffer, which the expert cache lends it until the answer\n"
+                 "                         starts, and the next layer's experts are copied into it while a layer\n"
+                 "                         runs (default: off)\n"
                  "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
@@ -964,6 +968,7 @@ int main(int argc, char** argv) {
         else if (a == "--lend-staging") o.lend_stage = true;
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
+        else if (a == "--stage-next") o.stage_next = true;
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
