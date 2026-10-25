@@ -17,7 +17,7 @@ FastStrata is the third project in a line:
 | --- | --- | --- |
 | [Strata](https://github.com/Niko1221/Strata) | Niko1221 and contributors | The original. The `strata` engine runs Qwen3.8-Flash-Next, a model of 24,576 experts of which each word needs 10: the graphics card keeps the experts asked for most and learns which those are as you use it, every expert sits in RAM and the processor computes the ones the card lacks at the same time, and a draft layer guesses the next words for the model to check. Around it: the one-click installer, a server with an OpenAI- and Anthropic-compatible API, and a web app with a chat and a live monitor. |
 | [PolyStrata](https://github.com/VecSzn/PolyStrata) | VecSzn | Adds a second engine, `strata-poly`, which reads a model's GGUF file where it lies, with no second copy: GLM 5.3 Flash first, then Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4, Tiel Coder and DeepSeek V4 Flash. The dense weights live in VRAM; the routed experts are split between a VRAM cache, filled by how much each expert is used and following what an answer uses, and the CPU, which computes the others from RAM while the card does its share. The model's own draft (MTP) block guesses up to three tokens ahead, and the model checks them in one pass. |
-| **FastStrata** | this fork | Narrows PolyStrata to the two models above that fit a gaming PC, Qwen3.6-35B-A3B and Ornith 1.5, four presets in all, and makes `strata-poly` fast on a small card: ten measured steps, nine changes to the engine and its settings ([below](#what-faststrata-changed)). |
+| **FastStrata** | this fork | Narrows PolyStrata to the two models above that fit a gaming PC, Qwen3.6-35B-A3B and Ornith 1.5, four presets in all, and makes `strata-poly` fast on a small card: thirteen measured steps, eleven changes to the engine and its settings ([below](#what-faststrata-changed)). |
 
 PolyStrata kept the attention cache in 16 bits, 22 KB a token for Qwen3.6, which holds 72K on a 6 GB card. FastStrata
 added an 8-bit cache, `--kv-q8` (2026-10-17, 11.7 KB a token: 144K on the 6 GB card), and a 4-bit one, `--kv-q4`
@@ -47,6 +47,8 @@ two runs of one build.
 | 9 | `--kv-q4`, `--kv-q4-keys q4` | The attention cache's values in 4 bits (8.9 KB a token), then its keys too (6.2 KB), for a card too small for the context. | 184K and the whole 256K on the 6 GB card, where `--kv-q8` holds 144K. | Lossy: a mean KL of 0.0040-0.0079 and 0.0090-0.0127; 8 and 10 sure tokens changed in 4,500 steps. Off unless the context needs it. |
 | 10 | the four presets | Old against new for every preset, what the smaller files cost the answers, and a simulated 4 GB card. | [Results](#results). | |
 | 11 | `--prompt-cache-message 2048` | A checkpoint where the prompt's last message begins, so the gateway's LODESTAR frame at the end of every prompt is not read again with the turn. | With LODESTAR, a turn's prompt 7.7 s where 19.3 (11,541 tokens read a turn -> 2,640); without it the same 5.0 s. | Lossless; without LODESTAR it costs 0.16 s a prompt and saves as much. |
+| 12 | (measured) | Which experts the cache should hold: a routing trace (`STRATA_ROUTE_TRACE`) and a simulator of cache rules, checked against the engine's own counts. | No rule that does not know the future was more than 3% better than the engine's; tables by kind of work (code, documents) did not help. | |
+| 13 | `--lend-staging` | The prompt batches' staging buffer (500 MiB) holds cached experts while an answer is written, and goes back before the next batch. | The agent benchmark 85.0 and 83.9 tok/s where 82.1 and 82.0; a simulated 4 GB card a third of the experts from VRAM where none, 11-19% faster without guesses. | Lossless: as between two runs without it. |
 
 `--tail-skip 6`, which leaves out an expert outside VRAM that every token of a window ranks seventh or eighth, is
 PolyStrata's setting for Qwen3.6 and stays: x1.15 on the same text for a mean KL of 0.0060 (step 6). Ornith 1.5 runs
@@ -270,7 +272,8 @@ Setup writes the engine's options into the model's run config, `strata-<family>-
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288 --conversation-cache-slots 8
+--elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
+--conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Each where the PC and the preset take it, and setup prints each with what it gave:
@@ -281,6 +284,7 @@ Each where the PC and the preset take it, and setup prints each with what it gav
 | `--attn-split` | NVIDIA from Turing (RTX 20) on |
 | `--graph-experts` | one NVIDIA card from Volta on with 5 GB of VRAM or more; not UD-Q3_K_M, whose experts it does not read |
 | `--elastic-prefill 1024` | one NVIDIA card |
+| `--lend-staging` | one NVIDIA card |
 | `--suffix-drafts 256` | a PC with the RAM setup estimates the preset wants |
 | `--cpu-multi` | a CPU with AVX2 and a preset with K-quant experts (not UD-Q3_K_M) |
 | `--kv-q8`, `--prompt-batch 512` | NVIDIA, where the context asked for does not fit the card in 16 bits; setup asks |

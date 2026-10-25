@@ -1349,6 +1349,185 @@ Without the flag (the 7 control prompts, tail skip 0, swaps 0, 64 tokens an answ
 same place and read the same tokens; the answers differed as between two runs of v0.2.0 itself (v0.2.0 against
 v0.2.0: 4 of 7 answers, from the 1st to the 48th token; v0.2.0 against this change: 3 of 7).
 
+## 12. Which experts the cache should hold: a routing trace and a simulator (2026-10-25, branch `poly/route-trace`)
+
+**The question.** Does the expert cache hold the experts an answer needs, could a better rule pick them (a table of
+experts for each kind of work, an algorithm from the caching literature), and would that rule carry to other cards
+and to work that is documents rather than code? Nothing in the engine's speed changed in this step; it measures.
+
+**What was added** (both opt-in; without them the build wrote the same 96 tokens after the 2K prompt as v0.3.0's
+engine, four runs of the build and two of v0.3.0's with `--tail-skip 0 --expert-swaps 0 --vram-reserve-mib 1024`,
+and the same with the trace on):
+
+- `STRATA_ROUTE_TRACE=FILE`: every call's routing (each token's 8 experts in the router's order, layer by layer, as
+  the engine routed them together), the cache's contents when it was filled, cut or grown, and the engine's own
+  counts, in a binary file (`Engine::Trace` in `src/poly/engine.cpp`; reader `test_scripts/route_trace.py`): 34 MB for
+  `day` below (92K prompt tokens read, 5,869 written), 18 MB for `agent`.
+- `STRATA_SWAP_HALF=N`: the cache's recent uses halved every N written tokens in place of 128 (`follow()`).
+- `test_scripts/cache_sim.py`: replays a trace through cache rules. Each rule has, slot size by slot size, the slots
+  the engine's cache had at each call (the attention cache takes VRAM as the context grows, a long read borrows it),
+  and is scored on what the engine counts: the routed experts of the calls of under 32 tokens, from VRAM or on the
+  CPU, with the trace's tail skip. Besides the share from VRAM: the experts the CPU reads (once a call for all the
+  call's tokens, at their bytes), the uploads into VRAM, and an estimate of the CPU's RAM time a call: (CPU bytes + 3
+  x upload bytes) / 38 GB/s, an upload being read from the file, written to pinned memory and read by the card.
+- The workloads: `agent` is `test_scripts/agent_bench.py run` (35 answers of the OpenCode-like session, its review,
+  the redo and the chat); `day` is `test_scripts/trace_run.py` (one engine, the daily flags with `--prompt-cache-message
+  2048`, 400 tokens at most an answer): four code prompts of `quality_prompts.py` and the 2K one, then eight document
+  requests of `test_scripts/doc_prompts.py` (summaries, a formal letter, an edit into an official register, a
+  translation, a table, a press note in Polish; a report and answers on a licence in English), then the tool prompt
+  again and the 37K one.
+
+**The engine's rule replayed** gives the engine's own counts: `day` 46.0% from VRAM against the engine's 46.6%, each
+of the 15 requests within 0.7 points; `agent` 38.7% against 39.3%, each of 29 requests within 3.7 points (most within
+1). The CPU's reads it counts were 4 to 9% more than `STRATA_CPU_STATS` measured in the runs below (their answers
+differ a little from the traced run's).
+
+**The rules on this laptop's cache** (RTX 3060 Laptop 6 GB, UD-Q4_K_M, the slots as in the traces). Oracles know the
+trace they are scored on; no engine can do as well as they do:
+
+| Rule | `agent`: from VRAM, CPU GB, uploads, est. ms a call | `day`: the same |
+| --- | --- | --- |
+| the engine's (uses halved every 128 tokens, an upload when twice as used + 2, 64 at a time) | 38.9%, 1,811, 6,952, 25.2 | 45.6%, 1,562, 7,032, 17.0 |
+| the cache as loaded, never moved | 29.4%, 2,021, 0, 27.5 | 32.3%, 1,858, 0, 19.7 |
+| uses halved every 32 tokens | 42.5%, 1,724, 23,689, 25.3 | 50.6%, 1,443, 22,019, 16.6 |
+| every 64 | 40.8%, 1,765, 12,962, 25.1 | 48.7%, 1,489, 12,094, 16.5 |
+| every 256 | 37.2%, 1,854, 3,793, 25.6 | 42.0%, 1,645, 3,874, 17.7 |
+| the half-life by the slots (slots / 15 tokens) | 41.4%, 1,750, 15,616, 25.1 | 49.4%, 1,472, 14,424, 16.5 |
+| a use counted once a call, only above the tail skip | 38.6%, 1,805, 6,624, 25.1 | 45.2%, 1,554, 6,712, 16.9 |
+| the same, uploads at three times as used + 3 | 37.2%, 1,840, 4,546, 25.4 | 42.8%, 1,611, 4,691, 17.4 |
+| a quarter of the slots kept for the answers' long-term most used | 37.9%, 1,821, 6,200, 25.3 | 45.0%, 1,559, 6,428, 16.9 |
+| the cache laid out again from the staging buffer after each read | 38.8%, 1,799, 7,048, 25.1 | 45.4%, 1,551, 7,458, 16.9 |
+| each expert's past share of uses that came again within 32 calls (in the manner of Hawkeye) | 42.6%, 1,700, 47,514, 26.9 | 49.9%, 1,438, 39,834, 17.6 |
+| oracle: one fixed table, the trace's most used | 32.9%, 1,934, 0, 26.4 | 38.4%, 1,702, 0, 18.0 |
+| oracle: a fixed table for code and one for documents, swapped for free | | 44.0%, 1,574, 0, 16.7 |
+| oracle: those tables at each request's start, then the engine's swaps | | 46.9%, 1,528, 10,224, 16.8 |
+| oracle: an upload only for an expert the next 32 calls use 3 times or more | 51.8%, 1,456, 42,592, 23.2 | 61.1%, 1,146, 44,399, 14.8 |
+| oracle: Belady's MIN, uploads unlimited | 66.1%, 1,036, 276,156, 35.6 | 71.4%, 841, 221,821, 22.3 |
+
+- No rule that does not know the future is more than 3% under the engine's estimated RAM time, and 3% is about what
+  one run differs from the next. A higher share from VRAM is paid for with uploads: halving every 32 tokens takes
+  3.1 to 3.4 times the uploads for 3.6 to 5.0 points more.
+- Tables by kind of work do not help: even the best fixed table for each kind, chosen with the answers known, holds
+  fewer of an answer's experts than the engine's swaps (44.0% against 45.6%), and with the swaps on top 1.3 points more.
+  The answers' experts change within an answer faster than between code and documents. A switch does show: the tool
+  prompt got 32.8% from VRAM before the eight document requests and 26.3% after them (41.3% and 27.0% in a first
+  recording of the same day), and the swaps bring the cache to the new work within the answer.
+- The room there is, as the oracle that weighs uploads shows: 8 to 13% less of the CPU's RAM time on this cache.
+  Belady's MIN shows how far more uploads could go (66 to 71% from VRAM) and that the RAM pays for them.
+
+**Measured on the engine, uses halved every 128 and every 32 tokens in turns** (`agent_bench.py run`, `STRATA_CPU_STATS=1`,
+the CPU's experts of the answers' calls):
+
+| | 128 | 32 | 128 | 32 |
+| --- | ---: | ---: | ---: | ---: |
+| all 35 answers, tok/s | 83.2 | 84.7 | 83.8 | 81.6 |
+| ms a window | 38.2 | 40.6 | 40.8 | 41.1 |
+| the CPU's experts: read | 1,545.6 GiB | 1,509.6 GiB | 1,628.1 GiB | 1,483.6 GiB |
+| at | 34.9 GB/s | 34.4 GB/s | 35.7 GB/s | 33.4 GB/s |
+| their time; the answers' decode time | 47.6 s; 65.6 s | 47.1 s; 65.7 s | 48.9 s; 66.8 s | 47.7 s; 66.7 s |
+
+With uses halved every 32 tokens the CPU read 2 to 9% less and read it 1 to 6% slower, as the uploads' RAM traffic
+says: its time the same to 4% less, the answers no faster. The estimate's ranking holds. The CPU's experts are 72 to
+73% of the answers' decode time here: what the cache holds counts, how it chooses has little left to give.
+
+**Other cards** (the same traces, every slot count scaled; est. ms a call, the engine's rule / halved every 64 / the
+half-life by the slots / the best fixed table / the oracle that weighs uploads):
+
+| Slots | `agent` | `day` |
+| --- | --- | --- |
+| a quarter (a 4 GB card, or 6 GB at a long context) | 31.7 / 31.5 / 31.7 / 32.6 / 30.6 | 22.1 / 21.7 / 21.6 / 23.1 / 20.9 |
+| as here | 25.2 / 25.1 / 25.1 / 26.4 / 23.2 | 17.0 / 16.5 / 16.5 / 18.0 / 14.8 |
+| 1.25 times (the staging buffer's 460 MiB lent while answering) | 23.7, 43.8% from VRAM | 15.8, 50.3% from VRAM |
+| twice | 19.8 / 19.9 / - / 20.8 / 16.8 | 13.0 / 12.7 / - / 13.8 / 9.7 |
+| four times (about a 12 to 16 GB card) | 13.0 / 13.5 / 12.9 / 13.2 / 9.7 | 8.2 / 8.3 / 8.3 / 8.1 / 5.5 |
+
+The rule that fits moves with the card: a short half-life on a small cache, the engine's 128 on a large one. The
+spread between them stays within 3% wherever the cache is; the oracle's room grows with it (25 to 33% at four times
+the slots). More slots are worth more than any rule: a quarter more takes 6 to 7% off the estimate, which at 72% of
+the decode time would be about 4 to 5% faster answers (an estimate; lending the staging buffer was measured once on
+step 5's branch: +238 experts, 58.7 -> 60.7 tok/s, inside the noise).
+
+No default changed. The trace and `STRATA_SWAP_HALF` stay as tools. Next, as these numbers order it: the staging
+buffer lent to the cache while an answer is written (lossless; to be measured at 37K and on the simulated 4 GB card,
+in turns with the old build); a predictor of reuse 32 calls ahead would be worth up to the oracle's 8 to 13%, and the
+one tried here was not (step 13 measured the first).
+
+## 13. The staging buffer's VRAM to the expert cache while an answer is written: `--lend-staging` (2026-10-25, branch `poly/stage-lend`)
+
+**What it does.** A prompt batch copies each layer's experts that are not cached through a staging buffer in VRAM,
+500 MiB with UD-Q4_K_M (a layer's experts). An answer's calls of a few tokens never read it. With `--lend-staging`
+that VRAM is the expert cache's while an answer is written: at the answer's first call (`Engine::lend_stage()`) the
+buffer's pieces of VRAM are unmapped from its addresses and mapped at the cache's end, and `follow()` gives the free
+slots there to the experts the answer uses most and the cache lacks, as uploads on the swaps' stream, no cached expert
+given up; nothing waits for them. Before any call of 32 tokens or more (a prompt batch, `run()` and `read()`) the
+cache gives the VRAM back (`end_loan()`): `shrink_cache()` keeps the experts used most in the slots that stay, and
+the same pieces are mapped at the buffer's addresses again. The cache's budget is the loan larger meanwhile, so that
+the attention caches' growth (`cover()`) does not take the loan back for nothing. On a card where no expert fits
+beside the dense weights at the start (the simulated 4 GB card), the cache gets its addresses and the swaps their
+thread all the same, for the loan to fill. One card that maps VRAM a piece at a time (CUDA's VMM), with swaps on;
+Qwen3.5 / 3.6 (the staging buffer is MMQ's). Without the flag the build wrote v0.3.0's 96 tokens after the 2K prompt
+(swaps off, md5 equal) and the code takes the old path.
+
+A first version released the buffer's VRAM and made new VRAM each time (`cuMemRelease`, `cuMemCreate`): it lent in
+5.6 ms and took back in 8.4 ms, and the agent benchmark's prompts were read 1.6% slower a token (2.32 to 2.33 s a
+thousand tokens in three runs against 2.28 and 2.28): new VRAM is slower at its first use on this Windows driver. Moving the same
+pieces between the two address ranges (`vmm_adopt()`, `vmm_kept_`) lends in 1.5 to 1.6 ms and takes back in 4.8 to
+4.9, and the prompts read as fast as without the flag. The numbers below are this version's unless marked.
+
+**Measured** on the RTX 3060 Laptop 6 GB, UD-Q4_K_M, v0.3.0's engine (old) and this build with `--lend-staging`
+(new) in turns, the daily flags (`--threads 8 --attn-split --graph-experts --elastic-prefill 1024 --suffix-drafts
+256 --cpu-multi` and `run_serve.py`'s `--max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6`), a fresh copy
+of the expert profile every run:
+
+| | Old | New |
+| --- | --- | --- |
+| The agent benchmark, all 35 answers, tok/s | 82.1, 82.0 | **85.0, 83.9** |
+| its prompts, s a thousand tokens read | 2.315, 2.277 | 2.270, 2.273 |
+| the CPU's experts a token written (`STRATA_CPU_STATS`) | 8.68, 8.83 ms; 284, 286 MiB | 8.34, 8.31 ms; 263, 262 MiB |
+| the first version, two runs before these: tok/s; CPU a token | 81.1, 81.5; 9.00, 8.85 ms | 84.5, 82.4; 8.15, 8.34 ms |
+| 37K prompt, 250 tokens: experts from VRAM | 47.9%, 48.3%, 48.8% | 57.0%, 57.7%, 56.9% |
+| tok/s; ms a window | 65.2, 64.5, 67.5; 31.6, 30.9, 31.8 | 64.3, 65.8, 65.5; 31.7, 31.0, 29.3 |
+| the same, the first version | 69.0, 68.8, 67.9; 32.5, 29.9, 31.1 | 70.8, 69.9, 67.5; 30.3, 30.5, 29.5 |
+| 37K, no guesses (`--no-draft`): tok/s; experts from VRAM | 55.7, 55.8; 51.9% | **57.2, 56.9**; 60.0%, 60.2% |
+| its CPU experts | 60.0 GiB in 1.79 s, 1.78 | 50.6 GiB in 1.57 s, 50.4 in 1.57 |
+| The 37K prompt read in | 35.9 to 36.2 s | 35.8 to 36.1 s |
+
+On the simulated 4 GB card (`test_scripts/vram_hold.py --card 4096`, 3,082 MiB free to the engine, as in step 10;
+the old engine holds no expert in VRAM there), a 2K prompt and 300 tokens, a 30K one (`make_prompt.py 30000`, 30,056
+tokens) and 250:
+
+| | Old | New |
+| --- | --- | --- |
+| 2K: experts from VRAM | 0% | 32.8%, 33.1%, 32.7% |
+| tok/s; ms a window | 60.4, 65.2, 67.9; 35.9, 30.2, 32.4 | 67.3, 68.7, 72.3; 32.9, 34.0, 32.6 |
+| no guesses: tok/s; the CPU's experts' time | 47.5, 47.8; 3.63 s, 3.60 | **56.5, 56.5**; 2.56 s, 2.56 (35.5% from VRAM) |
+| 30K: experts from VRAM | 0% | 28.2%, 28.4%, 28.4% |
+| tok/s; ms a window | 61.2, 61.4, 63.4; 37.6, 35.9, 36.4 | 59.4, 63.9, 63.2; 33.0, 31.4, 31.0 |
+| no guesses: tok/s; the CPU's experts' time | 46.6, 46.6; 2.96 s, 2.96 | **52.1, 51.6**; 2.30 s, 2.29 (30.3%, 30.6%) |
+| The 30K prompt read in | 35.9, 35.9, 36.0 s | 35.9, 35.9, 36.0 s |
+
+What the answers cost (`test_scripts/quality.py`, tail skip 0, `--cpu-multi`, this build without and with the flag in
+turns): the most likely token changed at 1.07% and 1.13% of the 1,500 steps without, 1.07% and 1.33% with, none
+where the reference was 60% or more sure; mean KL 0.0032, 0.0033 against 0.0034, 0.0035; the reference's perplexity
+1.1764, 1.1776 against 1.1778, 1.1781. As between two runs without it: which experts the card computes and which the
+CPU moves the sums a little, as the swaps already do. Writing the same text: 65.5, 66.0 -> 67.2, 68.1 tok/s.
+
+- **It is worth most where the cache is small**: on the 4 GB card a third of the experts come from VRAM where none
+  did, and without guesses the answers are 11 to 19% faster (the CPU's experts 22 to 29% less time). With guesses the
+  2K answers were 8% faster; at 30K the windows were 13% shorter but the answers got fewer guesses right, and tok/s
+  came out the same.
+- On this laptop's whole card it is 3% in the agent benchmark (every one of four pairs faster, the first version's
+  included) and on the same text; after the 37K prompt 9 points more from VRAM, the CPU's experts 12% less time without
+  guesses, 2% faster there and no change measurable with them.
+- The simulation of step 12 put a quarter more slots at 6 to 7% less of the CPU's time; 500 MiB are about 27% more
+  slots here, and in the agent benchmark the CPU's experts took 6% less time a token written (8.15 to 8.34 ms against
+  8.68 to 9.00 in all eight runs) and read 9% less (259 to 264 MiB a token against 284 to 293).
+- Setup writes it on one NVIDIA card, of any size (`poly_speedups()`, as `--elastic-prefill`; branch
+  `setup/lend-staging`), not on AMD cards or several cards. On the simulated 4 GB card it ran with `--graph-experts`,
+  which setup leaves out under 5 GB: without it the loan was not measured there. Not tested: a real 4 GB card, cards
+  of 8 GB or more, AMD (HIP maps VRAM a piece at a time too), Linux, Ornith 1.5, contexts past 37K on the whole card,
+  several cards (it is off there).
+
 ## Where it stands
 
 | | Before (16 threads, 2026-10-18) | Now (step 8) |

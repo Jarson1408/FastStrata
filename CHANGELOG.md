@@ -5,6 +5,29 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
+## v0.4.0 - 2026-10-25
+
+A new engine: while an answer is written, the VRAM that prompts are read through holds more of the model's experts.
+On the 6 GB test laptop an agent's answers are written 3% faster; on a 4 GB card, where no expert fitted in VRAM
+before, a third of them do now. The README says what a 4 GB card runs: which Qwen file, which context cache and how
+long a context. The ready-made engine of this release is a new file,
+`strata-poly-windows-x64-5a009f5d29282ef6.zip` (RTX 20 to RTX 50, CUDA 13.0).
+
+- `--lend-staging` (step 13 of docs/OPTIMIZATION_LOG.md): while an answer is written, the 500 MiB staging buffer that
+  prompt batches copy experts through holds cached experts, and it goes back before the next batch. On the 6 GB test
+  laptop an agent's 35 answers were written at 85.0 and 83.9 tok/s where 82.1 and 82.0; on the laptop with 2 GiB held
+  (a 4 GB card) a third of the experts came from VRAM where none did, 11 to 19% faster without guesses. The answers
+  move as between two runs without it. Setup writes it on one NVIDIA card. It needs this release's engine: with an
+  older one setup leaves the option out and says so. An install updated with UPDATE.bat keeps its config: add
+  `"--lend-staging"` to the `args` of `strata-<model>.json`.
+- `STRATA_ROUTE_TRACE` and `STRATA_SWAP_HALF` (step 12), tools for measuring the expert cache: a trace of the routing
+  and of what the cache held, for a simulator of cache rules (in the working repository). No rule the simulator
+  tried beat the engine's own by more than 3%, and tables of experts by kind of work (code, documents) did not help.
+- README.md and README.pl.md: a section on a 4 GB card, measured on the 6 GB card with 2 GiB held: Q4 (UD-Q4_K_M)
+  with the 8-bit context cache at 32K, Q3 (UD-Q3_K_M) up to 48K, which to take with 32 GB of RAM and with more, and
+  what was not measured.
+- Without the new options the engine writes v0.3.0's tokens.
+
 ## v0.3.0 - 2026-10-24
 
 A new engine: with LODESTAR on, a turn's prompt is read in 7.7 s where it took 19.3 (the user's own OpenCode session

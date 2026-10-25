@@ -51,6 +51,10 @@ struct Options {
                                   ///< 0: never.  Qwen3.5 / 3.6 on one card that maps VRAM a piece at a time
                                   ///< (--elastic-prefill)
     int elastic_batch = 4096;     ///< the widest such batch (--elastic-batch)
+    bool lend_stage = false;      ///< while an answer is written, the staging buffer's VRAM is the expert cache's,
+                                  ///< its slots filled by the swaps; a call of kStageRows tokens or more gets it
+                                  ///< back first (lend_stage(), end_loan()).  One card that maps VRAM a piece at a
+                                  ///< time, with swaps (--lend-staging)
     int stage_mib = 2048;         ///< the buffer the experts that are not cached pass through: by default about
                                   ///< what a layer of Q2_K experts leaves out of the cache, and never more than
                                   ///< a layer's experts take
@@ -152,6 +156,8 @@ struct Stats {
     int64_t tail_experts = 0;      ///< a token's experts left out by Options::tail_skip or Options::weight_cut
     int64_t deferred_experts = 0;  ///< a token's experts computed a layer late by Options::defer_from
     double cpu_ms = 0, route_wait_ms = 0;
+    int64_t loans = 0;             ///< Options::lend_stage: answers the staging buffer was lent for
+    double lend_ms = 0, end_ms = 0;   ///< the engine's thread in lend_stage() and in end_loan()
 };
 
 /// The most likely token of n logits: the first of the largest.
@@ -480,6 +486,10 @@ protected:
     void vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what);
     void vmm_unmap(Mapped& m, size_t bytes);
     void vmm_free(Mapped& m);
+    /// Maps `pieces` (VRAM another region gave up, vmm_kept_) at m's end while m is under `bytes` and they fit its
+    /// addresses, and frees the others.
+    void vmm_adopt(Mapped& m, std::vector<std::pair<unsigned long long, size_t>>& pieces, size_t bytes);
+    std::vector<std::pair<unsigned long long, size_t>>* vmm_kept_ = nullptr;   ///< set: vmm_unmap() keeps the VRAM
     void shrink_cache(size_t bytes, std::vector<int64_t>* gone = nullptr);
     int grow_cache(size_t bytes, const std::vector<int64_t>* first = nullptr);
     // Options::elastic_from: a long read in a wider batch (widen()).  The buffers a batch's size sets, beside the
@@ -498,6 +508,9 @@ protected:
     int widen(int n, int stretch);
     void narrow();
     void resize_card_cache(int mib);   ///< resize_cache() and mind_vram() for this engine's card
+    /// Options::lend_stage: the staging buffer's VRAM to the expert cache, for an answer's calls, and back.
+    void lend_stage();
+    void end_loan();
     bool mind_card_vram();
     void held_is_budget();
     void settle_swaps();
@@ -679,6 +692,11 @@ protected:
     float* d_wts_ = nullptr;
     int32_t* h_ids_ = nullptr;                    ///< pinned: the experts, back from the card
     uint8_t* stage_ = nullptr;                    ///< experts that are not cached, on their way through VRAM
+    Mapped stage_vm_;                             ///< its VRAM, mapped a piece at a time (Options::lend_stage)
+    size_t loan_ = 0;                             ///< the bytes of the expert cache that are the staging buffer's
+    bool loan_off_ = false;                       ///< the card would not map it: not again until the next batch
+    std::vector<std::pair<unsigned long long, size_t>> loan_pieces_;   ///< the VRAM moving between the two
+    bool loan_said_ = false;
     uint8_t* h_stage_[2] = {};                    ///< pinned; filled in turn
     void* ev_stage_[2] = {};                      ///< marks the upload out of each
     void* up_ = nullptr;                          ///< the stream of the uploads that start before the routing
@@ -725,10 +743,12 @@ protected:
     std::condition_variable swap_cv_;
     bool swap_quit_ = false;
     std::string swap_error_;         ///< why the thread stopped; follow() throws it
-    std::vector<float> recent_;      ///< per (layer, expert): its uses by written tokens, halved every kSwapHalf
+    std::vector<float> recent_;      ///< per (layer, expert): its uses by written tokens, halved every swap_half_
+    float swap_half_ = 0.f;          ///< written tokens: kSwapHalf, or STRATA_SWAP_HALF (load())
     std::vector<uint8_t> coming_;    ///< per (layer, expert): on its way into the cache
     std::vector<Pick> in_, out_;     ///< per trade number: the experts to bring in, and the ones to give up
     std::vector<size_t> trade_at_;   ///< per trade number: how many of its pairs follow() has taken
+    std::vector<size_t> took_at_;    ///< and how many of its experts to bring in took a free slot (lend_stage())
 
     int64_t pos_ = 0;
     const int32_t* tok_ = nullptr;       ///< the tokens of the call under way, a row each as h_rl_ has them (route())
@@ -736,6 +756,14 @@ protected:
     uint64_t images_set_ = 0;            ///< counts images(): what was derived from an earlier list is stale
     std::vector<int64_t> use_, prior_;   ///< routed count per (layer, expert): this run, and the profile's
     Stats stats_;
+
+    // STRATA_ROUTE_TRACE=FILE: every call's routing and what the cache held, written for test_scripts/cache_sim.py.
+    // One card only.  Unset, nothing is written and nothing else changes.
+    struct Trace;
+    std::unique_ptr<Trace> trace_;
+    void trace_open();
+    void trace_eval(const int32_t* tokens, int n);
+    void trace_layer(int il, int m, const int32_t* ids);
 };
 
 }  // namespace strata::poly

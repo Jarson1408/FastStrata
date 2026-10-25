@@ -46,7 +46,7 @@ Jedna karta NVIDIA, GeForce z serii RTX 20 lub nowsza:
 
 | VRAM | Co daje | Skąd to wiadomo |
 | --- | --- | --- |
-| **4 GB: minimum** | Krótki kontekst, 16K do 48K z pamięcią 8-bitową, pisanie z prędkością 42–56 tok/s. 32K to najmniej, z czym agent programistyczny taki jak OpenCode pracuje wygodnie. | Zmierzone na symulowanej karcie 4 GB: karcie 6 GB, której 2 GiB zajmuje inny program ([jak](docs/RESULTS.pl.md#na-karcie-4-gb-do-gier)) |
+| **4 GB: minimum** | Krótki kontekst, 16K do 48K z pamięcią 8-bitową, pisanie z prędkością 42–56 tok/s. 32K to najmniej, z czym agent programistyczny taki jak OpenCode pracuje wygodnie. Który plik i jaki kontekst: [niżej](#karta-4-gb). | Zmierzone na symulowanej karcie 4 GB: karcie 6 GB, której 2 GiB zajmuje inny program |
 | **6 GB: rozsądnie** | **Kontekst 144K** z modelem Q4 i pamięcią 8-bitową, pisanie z prędkością 49–72 tok/s. | Zmierzone: [laptop testowy](docs/RESULTS.pl.md#komputer-testowy) |
 | **8 GB: optymalnie** | Około 248K z modelem Q4 i pamięcią 8-bitową (144K z 16-bitową) i więcej ekspertów w VRAM. | Szacunek setupu pomniejszony o 10%; nie mierzono z FastStrata |
 
@@ -66,6 +66,53 @@ gdzie się mieszczą, 8 tam, gdzie nie, a 4 bity (`--kv-q4`, mniej dokładne) ty
 Setup sam to wszystko sprawdza i mówi, co się mieści, zanim cokolwiek pobierze: `START-HERE.bat --check` tylko
 pokazuje wynik. Pełna tabela według karty i presetu: [docs/RESULTS.pl.md](docs/RESULTS.pl.md#czego-potrzebujesz).
 
+### Karta 4 GB
+
+Działa, z krótkim kontekstem. Karty 4 GB nie było pod ręką: te przebiegi to karta 6 GB laptopa testowego, z której
+inny program zajął 2 GiB (`test_scripts/vram_hold.py --card 4096`), co zostawiło silnikowi 3082 MiB, mniej więcej
+tyle, ile zostaje na karcie 4 GB, gdy działa na niej pulpit. Prompt wypełniający kontekst, potem 256 napisanych
+tokenów ([wszystkie przebiegi](docs/RESULTS.pl.md#na-karcie-4-gb-do-gier)):
+
+| Plik modelu | Pamięć kontekstu | 16K | 32K | 48K | 64K |
+| --- | --- | --- | --- | --- | --- |
+| **Q4**: Qwen3.6 UD-Q4_K_M, 22,7 GB | **8 bitów** | | **mieści się, 50–55 tok/s** | nie uruchamiano | za duży: 19 tok/s |
+| | 4 bity | | mieści się, 55 tok/s | nie uruchamiano | za duży: 31 tok/s |
+| | 16 bitów | | jedyny przebieg się zatrzymał | | |
+| **Q3**: Qwen3.6 UD-Q3_K_M, 17,1 GB | **8 bitów** | mieści się, 55 tok/s | mieści się, 40–50 tok/s | **mieści się, 42 tok/s** | nie uruchamiano |
+| | 4 bity | mieści się, 56 tok/s | mieści się, 48 tok/s | mieści się, 48 tok/s | nie uruchamiano |
+| Ornith 1.5 APEX-I-COMPACT, 17,4 GB | 8 bitów | | mieści się, 48 tok/s | nie uruchamiano | nie uruchamiano |
+
+„Za duży” znaczy, że kontekst nie zmieścił się na karcie: Windows przeniósł pamięć karty do pamięci systemowej
+i pisanie zwolniło kilkukrotnie. Prompt 32K był czytany od początku w 37–40 s.
+
+| Twój komputer | Weź |
+| --- | --- |
+| **32 GB RAM** | **Q3** (UD-Q3_K_M) z pamięcią 8-bitową, 32K; do 48K na dłuższe sesje |
+| **48 GB RAM lub więcej** | **Q4** (UD-Q4_K_M) z pamięcią 8-bitową, 32K; Q3 tam, gdzie chcesz do 48K |
+
+- **Który plik.** Q4, jeśli komputer ma na niego RAM. Na karcie 4 GB żaden ekspert żadnego z plików Qwena nie mieści
+  się w VRAM, więc liczy je wszystkie procesor, a eksperci Q4 idą szybszą ścieżką CPU (`--cpu-multi`), której eksperci
+  Q3 nie mają: przy 32K Q4 pisał 55 tok/s, Q3 45. Q4 jest też dokładniejszy (Q3 względem niego zmienił najbardziej
+  prawdopodobny token w 4,1% kroków, średnia KL 0,020). Ale w trakcie pracy Q4 zajmuje 24–27 GB RAM, a Q3 19–22 GB:
+  na komputerze z 32 GB Q4 zostawia Windowsowi i innym programom za mało.
+- **Która pamięć kontekstu.** 8 bitów (`--kv-q8`). Mieści 32K z Q4 i 48K z Q3, a z małych formatów najmniej kosztuje
+  odpowiedzi: względem 16 bitów najbardziej prawdopodobny token zmienił się w 1,2–2,3% kroków. Pamięć 4-bitowa
+  (`--kv-q4`) pisała tu odrobinę szybciej, ale kosztuje więcej (1,9–3,3%) i w tym, co uruchomiono, nie zmieściła
+  dłuższego kontekstu: jest na kontekst, którego 8 bitów nie pomieści. Pamięć 16-bitowa nie jest na kartę 4 GB.
+- **Jaki kontekst.** 32K, najmniej, przy którym agent do kodu taki jak OpenCode pracuje wygodnie: Q4 przy 32K albo Q3
+  do 48K. Nie ustawiaj więcej: ponad to, co się mieści, pisanie zwalnia kilkukrotnie. Między 48K a 64K niczego nie
+  uruchamiano.
+- **Co robi setup.** Na karcie z 3 do 4,5 GB wolnej pamięci menu proponuje Q4 przy 32K (od 26,1 GB wolnego RAM), Q3
+  przy 48K (od 20,6), Ornith APEX-I-COMPACT przy 32K (od 21,8) i APEX-I-QUALITY przy 24K (szacunek, od 27,6), wszystkie
+  z pamięcią 8-bitową, i poleca pierwszy, który uruchamia 32K lub więcej i mieści się w Twoim RAM. Karta poniżej 5 GB
+  nie dostaje `--graph-experts` (z nim jeden przebieg z dwóch się tam zatrzymał, a dawał około 3%).
+- **Od v0.4.0:** `--lend-staging`, które setup dopisuje na jednej karcie NVIDIA, umieszcza na takiej karcie
+  około jednej trzeciej ekspertów w VRAM, gdzie wcześniej nie mieścił się żaden: z Q4 i pamięcią 8-bitową 11–19%
+  szybciej bez zgadywania ([krok 13](docs/OPTIMIZATION_LOG.md)). Mierzone z włączonym `--graph-experts`, którego setup
+  tu nie daje.
+- **Niezmierzone:** prawdziwa karta 4 GB (jej przepustowość pamięci, łącze PCIe, ile VRAM zajmuje jej pulpit; setup
+  pyta, czy pulpit działa na karcie NVIDIA), konteksty między 48K a 64K, komputer z 32 GB RAM.
+
 ### Karty AMD
 
 Przyspieszenia FastStrata są napisane dla kart NVIDIA RTX (CUDA) i większość z nich nie działa na karcie AMD. Z kartą
@@ -75,8 +122,9 @@ AMD zajrzyj do [PolyStrata](https://github.com/VecSzn/PolyStrata), projektu, z k
   zanim cokolwiek pobierze.
 - **Linux z ROCm** (z jego pakietami deweloperskimi): setup kompiluje silnik, bo gotowy silnik z wydania jest dla
   NVIDIA. Działają przyspieszenia po stronie procesora (`--threads`, `--cpu-multi`, `--suffix-drafts`, pamięć rozmów),
-  nie działają te na karcie (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`). Pamięć
-  uwagi zostaje 16-bitowa, 22 KB na token zamiast 11,7, więc ta sama ilość VRAM mieści mniej więcej połowę kontekstu.
+  nie działają te na karcie (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`,
+  `--lend-staging`). Pamięć uwagi zostaje 16-bitowa, 22 KB na token zamiast 11,7, więc ta sama ilość VRAM mieści
+  mniej więcej połowę kontekstu.
 - **Niezmierzone** na żadnej karcie AMD. Przeniesienie przyspieszeń karty na HIP albo pomiar z karty AMD są mile
   widziane: [docs/TEST_REQUESTS.md](docs/TEST_REQUESTS.md).
 
@@ -227,7 +275,8 @@ laptopie testowym, dla UD-Q4_K_M przy 144K:
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288 --conversation-cache-slots 8
+--elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
+--conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Każdą tam, gdzie komputer i preset ją przyjmują ([który komputer dostaje którą](docs/RESULTS.pl.md#konfiguracja)), a
@@ -241,8 +290,8 @@ FastStrata jest trzecim projektem w linii. [Strata](https://github.com/Niko1221/
 uruchamia Qwen3.8-Flash-Next z ekspertami podzielonymi między kartę a procesor i wniosła instalator, serwer i aplikację
 webową. [PolyStrata](https://github.com/VecSzn/PolyStrata) (VecSzn) dodała `strata-poly`, silnik, który czyta plik GGUF
 modelu tam, gdzie leży, dla Qwen3.6-35B-A3B, Ornith 1.5 i innych. FastStrata zawęża go do dwóch modeli, które mieszczą
-się na komputerze do gier, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: jedenaście
-zmierzonych kroków, dziesięć zmian w silniku i jego ustawieniach ([każda z nich](docs/RESULTS.pl.md#co-zmieniła-faststrata)).
+się na komputerze do gier, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: trzynaście
+zmierzonych kroków, jedenaście zmian w silniku i jego ustawieniach ([każda z nich](docs/RESULTS.pl.md#co-zmieniła-faststrata)).
 
 Do Qwen3.8-Flash-Next użyj [Strata](https://github.com/Niko1221/Strata). Plany: profile ekspertów dołączone do każdego
 presetu; tryb dla komputerów z 16–24 GB

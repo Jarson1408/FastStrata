@@ -46,7 +46,7 @@ One NVIDIA card, GeForce RTX 20 series or newer:
 
 | VRAM | What it gives | How it is known |
 | --- | --- | --- |
-| **4 GB: the minimum** | A short context, 16K to 48K with an 8-bit cache, writing at 42 to 56 tok/s. 32K is the least a coding agent like OpenCode works with comfortably. | Measured on a simulated 4 GB card: the 6 GB card with 2 GiB held by another program ([how](docs/RESULTS.md#on-a-4-gb-gaming-card)) |
+| **4 GB: the minimum** | A short context, 16K to 48K with an 8-bit cache, writing at 42 to 56 tok/s. 32K is the least a coding agent like OpenCode works with comfortably. Which file and context: [below](#a-4-gb-card). | Measured on a simulated 4 GB card: the 6 GB card with 2 GiB held by another program |
 | **6 GB: sensible** | **A 144K context** with the Q4 model and an 8-bit cache, writing at 49 to 72 tok/s. | Measured: [the test laptop](docs/RESULTS.md#the-test-pc) |
 | **8 GB: optimal** | About 248K with the Q4 model and an 8-bit cache (144K with a 16-bit one), and more of the experts in VRAM. | Setup's estimate less 10%; not measured with FastStrata |
 
@@ -66,6 +66,51 @@ where they fit, 8 where they do not, and 4 bits (`--kv-q4`, less exact) only whe
 Setup checks all of this itself and says what fits before it downloads anything: `START-HERE.bat --check` only
 reports. The full table by card and preset: [docs/RESULTS.md](docs/RESULTS.md#what-you-need).
 
+### A 4 GB card
+
+It runs, with a short context. No 4 GB card was at hand: these runs are the test laptop's 6 GB card with 2 GiB held by
+another program (`test_scripts/vram_hold.py --card 4096`), which left the engine 3,082 MiB, about what a 4 GB card
+leaves once the desktop runs on it. A prompt that fills the context, then 256 tokens written
+([every run](docs/RESULTS.md#on-a-4-gb-gaming-card)):
+
+| Model file | Context cache | 16K | 32K | 48K | 64K |
+| --- | --- | --- | --- | --- | --- |
+| **Q4**: Qwen3.6 UD-Q4_K_M, 22.7 GB | **8 bits** | | **fits, 50-55 tok/s** | not run | too big: 19 tok/s |
+| | 4 bits | | fits, 55 tok/s | not run | too big: 31 tok/s |
+| | 16 bits | | its one run stopped | | |
+| **Q3**: Qwen3.6 UD-Q3_K_M, 17.1 GB | **8 bits** | fits, 55 tok/s | fits, 40-50 tok/s | **fits, 42 tok/s** | not run |
+| | 4 bits | fits, 56 tok/s | fits, 48 tok/s | fits, 48 tok/s | not run |
+| Ornith 1.5 APEX-I-COMPACT, 17.4 GB | 8 bits | | fits, 48 tok/s | not run | not run |
+
+"Too big" means the context did not fit the card: Windows moved the card's memory into system RAM and writing slowed
+several times. A 32K prompt was read from its start in 37 to 40 s.
+
+| Your PC | Take |
+| --- | --- |
+| **32 GB of RAM** | **Q3** (UD-Q3_K_M) with the 8-bit cache, 32K; up to 48K for longer sessions |
+| **48 GB of RAM or more** | **Q4** (UD-Q4_K_M) with the 8-bit cache at 32K; Q3 where you want up to 48K |
+
+- **Which file.** Q4 where the PC has the RAM for it. On a 4 GB card no expert of either Qwen file fits in VRAM, so
+  the processor computes them all, and Q4's experts take the faster CPU path (`--cpu-multi`) that Q3's do not: at
+  32K Q4 wrote 55 tok/s where Q3 wrote 45. Q4 is also the more exact one (against it Q3 changed the most likely token
+  at 4.1% of the steps, a mean KL of 0.020). But while it runs Q4 holds 24-27 GB of RAM and Q3 19-22 GB: on a PC with
+  32 GB, Q4 leaves Windows and your other programs too little.
+- **Which cache.** 8 bits (`--kv-q8`). It holds 32K with Q4 and 48K with Q3, and of the small caches it costs the
+  answers least: against the 16-bit cache the most likely token changed at 1.2-2.3% of the steps. The 4-bit cache
+  (`--kv-q4`) wrote a little faster here, but costs more (1.9-3.3%) and fits nothing longer in what was run: it is for
+  a context the 8-bit one cannot hold. The 16-bit cache is not for a 4 GB card.
+- **Which context.** 32K, the least a coding agent like OpenCode works with comfortably: Q4 at 32K, or Q3 up to 48K.
+  Do not set more: past what fits, writing slows several times. Between 48K and 64K nothing was run.
+- **What setup does.** On a card with 3 to 4.5 GB free its menu offers Q4 at 32K (from 26.1 GB of free RAM), Q3 at
+  48K (from 20.6), Ornith APEX-I-COMPACT at 32K (from 21.8) and APEX-I-QUALITY at 24K (estimated, from 27.6), all with
+  the 8-bit cache, and recommends the first one that runs 32K or more and fits your RAM. A card under 5 GB gets no
+  `--graph-experts` (one run of two stopped with it there, and it gave about 3%).
+- **From v0.4.0:** `--lend-staging`, which setup writes on one NVIDIA card, puts about a third of
+  the experts in VRAM on such a card where none fitted: with Q4 and the 8-bit cache 11-19% faster without guesses
+  ([step 13](docs/OPTIMIZATION_LOG.md)). It was measured with `--graph-experts` on, which setup leaves out here.
+- **Not measured:** a real 4 GB card (its memory bandwidth, its PCIe link, how much VRAM its desktop takes; setup
+  asks whether the desktop runs on the NVIDIA card), contexts between 48K and 64K, a PC with 32 GB of RAM.
+
 ### AMD cards
 
 FastStrata's speedups are written for NVIDIA RTX cards (CUDA), and most of them do not run on an AMD card. With an AMD
@@ -75,7 +120,8 @@ card, look at [PolyStrata](https://github.com/VecSzn/PolyStrata), the project Fa
   before it downloads anything.
 - **Linux with ROCm** (its development packages): setup compiles the engine, since the ready-made one in the release
   is for NVIDIA. The speedups on the processor apply (`--threads`, `--cpu-multi`, `--suffix-drafts`, the conversation
-  cache); the ones on the card do not (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`).
+  cache); the ones on the card do not (`--kv-q8`, `--kv-q4`, `--attn-split`, `--graph-experts`, `--elastic-prefill`,
+  `--lend-staging`).
   The attention cache stays in 16 bits, 22 KB a token instead of 11.7, so the same VRAM holds about half the context.
 - **Not measured** on any AMD card. Moving the card's speedups to HIP, or a measurement from an AMD card, is welcome:
   [docs/TEST_REQUESTS.md](docs/TEST_REQUESTS.md).
@@ -225,7 +271,8 @@ the test laptop, for UD-Q4_K_M at 144K:
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288 --conversation-cache-slots 8
+--elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
+--conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Each where the PC and the preset take it ([which PC gets which](docs/RESULTS.md#configuration)), and setup prints each
@@ -238,7 +285,7 @@ FastStrata is the third project in a line. [Strata](https://github.com/Niko1221/
 runs Qwen3.8-Flash-Next with its experts split between the card and the CPU, and brought the installer, the server and
 the web app. [PolyStrata](https://github.com/VecSzn/PolyStrata) (VecSzn) added `strata-poly`, an engine that reads a
 model's GGUF file in place, for Qwen3.6-35B-A3B, Ornith 1.5 and others. FastStrata narrows it to the two models that
-fit a gaming PC, four presets in all, and makes `strata-poly` fast on a small card: eleven measured steps, ten changes
+fit a gaming PC, four presets in all, and makes `strata-poly` fast on a small card: thirteen measured steps, eleven changes
 to the engine and its settings ([each one](docs/RESULTS.md#what-faststrata-changed)).
 
 For Qwen3.8-Flash-Next use [Strata](https://github.com/Niko1221/Strata). Plans: expert profiles shipped with each

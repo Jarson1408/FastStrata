@@ -17,7 +17,7 @@ FastStrata jest trzecim projektem w linii:
 | --- | --- | --- |
 | [Strata](https://github.com/Niko1221/Strata) | Niko1221 i współtwórcy | Oryginał. Silnik `strata` uruchamia Qwen3.8-Flash-Next, model z 24 576 ekspertów, z których każde słowo potrzebuje 10: karta graficzna trzyma ekspertów wybieranych najczęściej i w trakcie używania uczy się, którzy to są, wszyscy eksperci są w RAM, a procesor w tym samym czasie liczy tych, których karta nie ma; warstwa szkicu (draft) zgaduje kolejne słowa, a model je sprawdza. Do tego: instalator jednym kliknięciem, serwer z API zgodnym z OpenAI i Anthropic oraz aplikacja webowa z czatem i podglądem na żywo. |
 | [PolyStrata](https://github.com/VecSzn/PolyStrata) | VecSzn | Dodaje drugi silnik, `strata-poly`, który czyta plik GGUF modelu tam, gdzie leży, bez drugiej kopii: najpierw GLM 5.3 Flash, potem Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4, Tiel Coder i DeepSeek V4 Flash. Gęste wagi są w VRAM; eksperci routowani są dzieleni między pamięć podręczną w VRAM, wypełnianą według tego, jak często każdy ekspert jest używany, i podążającą za tym, czego używa odpowiedź, a procesor, który liczy pozostałych z RAM, gdy karta robi swoją część. Własny blok szkicu modelu (MTP) zgaduje do trzech tokenów naprzód, a model sprawdza je w jednym przebiegu. |
-| **FastStrata** | ten fork | Zawęża PolyStrata do dwóch z tych modeli, które mieszczą się na komputerze do gier, Qwen3.6-35B-A3B i Ornith 1.5, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: dziesięć zmierzonych kroków, dziewięć zmian w silniku i jego ustawieniach ([niżej](#co-zmieniła-faststrata)). |
+| **FastStrata** | ten fork | Zawęża PolyStrata do dwóch z tych modeli, które mieszczą się na komputerze do gier, Qwen3.6-35B-A3B i Ornith 1.5, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: trzynaście zmierzonych kroków, jedenaście zmian w silniku i jego ustawieniach ([niżej](#co-zmieniła-faststrata)). |
 
 PolyStrata trzymała pamięć podręczną uwagi w 16 bitach, 22 KB na token dla Qwen3.6, co na karcie 6 GB mieści 72K.
 FastStrata dodała pamięć 8-bitową, `--kv-q8` (17.10.2026, 11,7 KB na token: 144K na karcie 6 GB), i 4-bitową,
@@ -47,6 +47,8 @@ nie bardziej niż między dwoma przebiegami tej samej wersji.
 | 9 | `--kv-q4`, `--kv-q4-keys q4` | Wartości pamięci podręcznej uwagi w 4 bitach (8,9 KB na token), potem także klucze (6,2 KB), dla karty za małej na kontekst. | 184K i cały kontekst 256K na karcie 6 GB, gdzie `--kv-q8` mieści 144K. | Stratna: średnia KL 0,0040–0,0079 i 0,0090–0,0127; 8 i 10 zmienionych pewnych tokenów w 4500 krokach. Wyłączona, chyba że kontekst jej wymaga. |
 | 10 | cztery presety | Stary silnik kontra nowy dla każdego presetu, ile mniejsze pliki kosztują odpowiedzi, i symulowana karta 4 GB. | [Wyniki](#wyniki). | |
 | 11 | `--prompt-cache-message 2048` | Punkt kontrolny tam, gdzie zaczyna się ostatnia wiadomość promptu, więc blok LODESTAR, który bramka dokleja na końcu każdego promptu, nie jest czytany od nowa z turą. | Z LODESTAR prompt tury 7,7 s zamiast 19,3 (11 541 tokenów czytanych na turę -> 2 640); bez niego te same 5,0 s. | Bezstratnie; bez LODESTAR kosztuje 0,16 s na prompt i tyle samo oszczędza. |
+| 12 | (pomiar) | Których ekspertów powinien trzymać cache: zapis routingu (`STRATA_ROUTE_TRACE`) i symulator reguł cache'u, sprawdzony z liczbami samego silnika. | Żadna reguła, która nie zna przyszłości, nie była lepsza od silnika o więcej niż 3%; tabele według rodzaju pracy (kod, dokumenty) nie pomogły. | |
+| 13 | `--lend-staging` | Bufor stagingu partii promptu (500 MiB) trzyma ekspertów cache'u, gdy pisana jest odpowiedź, i wraca przed następną partią. | Benchmark agenta 85,0 i 83,9 tok/s zamiast 82,1 i 82,0; na symulowanej karcie 4 GB jedna trzecia ekspertów z VRAM zamiast żadnego, 11–19% szybciej bez zgadywania. | Bezstratnie: jak między dwoma przebiegami bez niej. |
 
 `--tail-skip 6`, które pomija eksperta spoza VRAM, gdy każdy token okna stawia go na siódmym lub ósmym miejscu, to
 ustawienie PolyStrata dla Qwen3.6 i zostaje: x1,15 na tym samym tekście przy średniej KL 0,0060 (krok 6). Ornith 1.5
@@ -274,7 +276,8 @@ Setup zapisuje opcje silnika w konfiguracji uruchomienia modelu, `strata-<rodzin
 
 ```text
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
---elastic-prefill 1024 --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288 --conversation-cache-slots 8
+--elastic-prefill 1024 --lend-staging --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288
+--conversation-cache-slots 8 --prompt-cache-message 2048
 ```
 
 Każdą tam, gdzie komputer i preset ją przyjmują; setup wypisuje każdą razem z tym, co dała:
@@ -285,6 +288,7 @@ Każdą tam, gdzie komputer i preset ją przyjmują; setup wypisuje każdą raze
 | `--attn-split` | NVIDIA od Turinga (RTX 20) wzwyż |
 | `--graph-experts` | jednej karcie NVIDIA od Volty wzwyż z co najmniej 5 GB VRAM; nie UD-Q3_K_M, którego ekspertów nie czyta |
 | `--elastic-prefill 1024` | jednej karcie NVIDIA |
+| `--lend-staging` | jednej karcie NVIDIA |
 | `--suffix-drafts 256` | komputerowi z RAM, którego według szacunku setupu preset potrzebuje |
 | `--cpu-multi` | procesorowi z AVX2 i presetowi z ekspertami K-quant (nie UD-Q3_K_M) |
 | `--kv-q8`, `--prompt-batch 512` | NVIDIA, gdy żądany kontekst nie mieści się na karcie w 16 bitach; setup pyta |

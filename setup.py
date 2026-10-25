@@ -736,7 +736,7 @@ POLY_SPEEDUPS = ("on", "off")
 FASTSTRATA_FAMILIES = ("qwen36", "ornith")
 # FastStrata's release: CHANGELOG.md has a section for it, release/make_faststrata_release.py tags the public tree
 # v<this>; on the screen and in the log, so a report says which one it is
-FASTSTRATA_VERSION = "0.3.0"
+FASTSTRATA_VERSION = "0.4.0"
 STRATA_URL = "https://github.com/Niko1221/Strata"
 POLY_SUFFIX_MIB = 256            # --suffix-drafts: an index of 4.2M tokens in 160 MiB of RAM (step 7)
 POLY_ELASTIC_FROM = 1024         # --elastic-prefill: a prompt of this many tokens or more is read wider (step 5)
@@ -773,7 +773,7 @@ POLY_EXPERT_FLOOR_GB = 0.25
 # from another source than this fork's has not all of them, and stops at an option it does not know
 POLY_SPEEDUP_FLAGS = ("--threads", "--attn-split", "--graph-experts", "--elastic-prefill", "--suffix-drafts",
                       "--cpu-multi", "--kv-q8", "--kv-q4", "--kv-q4-keys", "--prompt-batch",
-                      "--conversation-cache-slots", "--prompt-cache-message")
+                      "--conversation-cache-slots", "--prompt-cache-message", "--lend-staging")
 # MODEL-UPDATE Phase 1: the K-quant prompt kernels (Unsloth's UD-Q4/Q5/Q6_K_XL experts) are a library next to the CUDA
 # engine, opened only for those models; an engine without it runs them on the FP16 prompt path
 KQ_LIB = "strata_kq.dll" if WIN else "libstrata_kq.so"
@@ -6510,6 +6510,9 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
       without it.
     - --elastic-prefill 1024: one NVIDIA card; the engine checks that the card maps VRAM a piece at a time (with a layer
       split, or with the --kv-whole an AMD card gets, it reads as without it).
+    - --lend-staging: one NVIDIA card, as --elastic-prefill; the engine checks that the card maps VRAM a piece at a
+      time and that the swaps are on (step 13: the agent benchmark 82.1, 82.0 -> 85.0, 83.9 tok/s on the 6 GB laptop;
+      on a simulated 4 GB card a third of the experts from VRAM where none).
     - --kv-q8, --prompt-batch 512: NVIDIA, where the context needs them (poly_kv_plan()).
     - --kv-q4, then --kv-q4-keys q4: NVIDIA, where even --kv-q8 and --prompt-batch 512 leave the context too little
       VRAM (poly_kv_plan()).
@@ -6559,8 +6562,8 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
             notes.append(f"--attn-split left out: it runs on NVIDIA cards from Turing (RTX 20) on, and sm_{archs[0]} "
                          "is older")
         if multi:
-            notes.append("--graph-experts and --elastic-prefill left out: they run on one card, and these cards share "
-                         "the model's layers")
+            notes.append("--graph-experts, --elastic-prefill and --lend-staging left out: they run on one card, and "
+                         "these cards share the model's layers")
         else:
             vram = gpu.get("vram_gb")
             if archs[0] < 70:
@@ -6579,6 +6582,10 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
             items.append((["--elastic-prefill", str(POLY_ELASTIC_FROM)],
                           "long prompts read in wider batches, on VRAM the expert cache lends them: 37K tokens in 36 s "
                           "where 47 (step 5)"))
+            items.append((["--lend-staging"],
+                          "the prompt batches' staging buffer holds cached experts while an answer is written: an "
+                          "agent's 35 answers 85.0 and 83.9 tok/s where 82.1 and 82.0; on a simulated 4 GB card a "
+                          "third of the experts from VRAM where none (step 13)"))
     if ram >= need_ram:
         items.append((["--suffix-drafts", str(POLY_SUFFIX_MIB)],
                       "guesses from every conversation since the engine started, in 160 MiB of RAM: an agent's task "
@@ -6600,7 +6607,7 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
                       f"up to {POLY_CONV_CACHE_BIG_SLOTS} conversations parked in the {conv // 1024} GiB cache, where "
                       "the engine keeps 4 (step 2; not measured for speed)"))
     if hip:
-        notes.append("--prompt-cache-message left out: measured on NVIDIA cards only")
+        notes.append("--prompt-cache-message and --lend-staging left out: measured on NVIDIA cards only")
     else:                                              # the gateway's LODESTAR frame ends every prompt (step 11)
         items.append((["--prompt-cache-message", str(POLY_MESSAGE_CHECKPOINT)],
                       "a checkpoint where the prompt's last message begins, so the gateway's LODESTAR frame there is "

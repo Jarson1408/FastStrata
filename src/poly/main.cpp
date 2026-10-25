@@ -726,6 +726,10 @@ int serve(Session& ss) {
             saved = Clock::now();
         }
     }
+    if (const strata::poly::Stats& st = engine.stats(); st.loans > 0)
+        std::fprintf(stderr, "strata-poly: --lend-staging: lent for %lld answers, %.1f ms a loan to lend and %.1f to "
+                             "take back\n", (long long) st.loans, st.lend_ms / (double) st.loans,
+                     st.end_ms / (double) st.loans);
     std::fprintf(stderr, "strata-poly: %lld of %lld prompt tokens were not read again (%.1f%%); %zu conversations "
                          "parked in %zu MiB, %zu pushed out; %lld MiB of VRAM free at the end\n",
                  ss.reused, ss.asked, ss.asked > 0 ? 100.0 * (double) ss.reused / (double) ss.asked : 0.0,
@@ -843,6 +847,9 @@ void usage() {
                  "                         back with the same experts (default 0 = never)\n"
                  "  --elastic-batch N      the widest such batch, as wide as the VRAM free and the cache allow\n"
                  "                         (default 4096)\n"
+                 "  --lend-staging         Qwen3.5 / 3.6 on one card: while an answer is written, the VRAM the experts\n"
+                 "                         outside the cache pass through in a prompt batch holds more cached\n"
+                 "                         experts, and a prompt batch gets it back first (default: off)\n"
                  "  --stage-mib N          VRAM the experts outside the cache pass through in a prompt batch (default\n"
                  "                         2048, or what a layer's experts take when that is less); with less, more\n"
                  "                         of them are copied after the layer has routed\n"
@@ -954,6 +961,7 @@ int main(int argc, char** argv) {
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--elastic-prefill") o.elastic_from = std::atoi(val());
         else if (a == "--elastic-batch") o.elastic_batch = std::atoi(val());
+        else if (a == "--lend-staging") o.lend_stage = true;
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());

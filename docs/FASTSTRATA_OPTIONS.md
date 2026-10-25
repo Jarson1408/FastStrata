@@ -33,7 +33,9 @@ A ninth, `--kv-q4`, is not a speedup: it fits a longer context into a smaller ca
 ([below](#--kv-q4-the-context-cache-in-4-bits-for-a-card-too-small-for-the-context)). A tenth,
 `--prompt-cache-message`, is for a gateway that ends every prompt with a message the next one leaves out
 ([below](#--prompt-cache-message-a-gateways-frame-at-the-end-of-every-prompt-not-read-again)); setup writes it on NVIDIA
-from v0.3.0.
+from v0.3.0. An eleventh, `--lend-staging`, gives the prompt batches' staging buffer to the expert cache while an
+answer is written ([below](#--lend-staging-the-staging-buffers-vram-to-the-expert-cache-while-an-answer-is-written));
+setup writes it on one NVIDIA card from v0.4.0.
 
 ## What setup turns on, and when
 
@@ -65,6 +67,7 @@ card, CPU and RAM take them, and prints each one with what it gave:
 | `--attn-split` | an answer's attention in one pass over the cache, on the tensor cores | after 37K: 60.2, 61.7 tok/s where 46.1, 48.5 (step 3) | NVIDIA cards from Turing (RTX 20) on |
 | `--graph-experts` | each layer of an answer as one CUDA graph | 10% less time a window after 2K, 7% after 37K (step 4) | one NVIDIA card from Volta on with 5 GB of VRAM or more, not a layer split, not UD-Q3_K_M |
 | `--elastic-prefill 1024` | a long prompt read in wider batches, on VRAM the expert cache lends it | 37K read in 36.0 s where 47.0, 139K in 245.7 s where 264.1 (step 5) | one NVIDIA card |
+| `--lend-staging` | the prompt batches' staging buffer (500 MiB) holds cached experts while an answer is written | an agent's 35 answers 85.0, 83.9 tok/s where 82.1, 82.0; a simulated 4 GB card 11-19% faster without guesses (step 13) | one NVIDIA card (the engine checks that it maps VRAM a piece at a time) |
 | `--suffix-drafts 256` | guesses from every conversation the engine has seen, in 160 MiB of RAM | a task given again in a new conversation 97.9, 106.7 tok/s where 90.1; a plain chat as before (step 7) | a PC with the RAM setup estimates the preset wants |
 | `--cpu-multi` | the CPU's Q4_K, Q5_K and Q6_K experts read once for all the tokens of a window, the same bits | 78.2 tok/s after 2K where 74.6; 1-2% in a later check (step 8) | a preset with K-quant experts (not UD-Q3_K_M), on a CPU with AVX2 |
 | `--kv-q8` | the attention cache in 8 bits: 11.7 KB a token where 22 KB | a 144K context on the 6 GB card | NVIDIA, when the context asked for does not fit the card in 16 bits by setup's estimate. Setup asks (`--yes` takes it) |
@@ -480,3 +483,38 @@ and the places the engine's own log showed in the session. Every number:
 [docs/OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md), step 11. Not tested: other gateways and clients, Ornith 1.5, GLM
 (whose template opens a turn with a token of its role: the checkpoint goes where the reply before began), AMD (HIP) and Intel
 (SYCL) builds (host code).
+
+## `--lend-staging`: the staging buffer's VRAM to the expert cache while an answer is written
+
+A prompt batch copies each layer's experts that are not cached through a staging buffer in VRAM: 500 MiB with
+Qwen3.6 UD-Q4_K_M, about 270 experts' worth. An answer's calls of a few tokens never read it. With
+**`--lend-staging`** that VRAM holds cached experts while an answer is written: at the answer's first call it is
+moved to the end of the expert cache, the experts the answer uses most come into the free slots on the swaps' stream
+(nothing waits for them), and before the next prompt batch the cache gives it back, keeping the experts used most in
+the slots that stay. The same VRAM moves between the two places, so lending and taking it back cost 1.5 and 4.9 ms a
+turn and the prompts read as fast as before. On a card where no expert fits beside the model's dense weights (a 4 GB
+card) the loan is all the cache there is.
+
+| On the test PC, old (v0.3.0) and new in turns | Old | `--lend-staging` |
+| --- | ---: | ---: |
+| The agent benchmark, 35 answers, tok/s | 82.1, 82.0 | **85.0, 83.9** |
+| the CPU's experts a token written | 8.68, 8.83 ms | 8.34, 8.31 ms |
+| After a 37K prompt: experts from VRAM; tok/s | 48%; 64.5 to 67.5 | 57 to 58%; 64.3 to 65.8 |
+| the same without guesses (`--no-draft`), tok/s | 55.7, 55.8 | **57.2, 56.9** |
+| A simulated 4 GB card, 2K prompt: experts from VRAM; tok/s | 0%; 60.4 to 67.9 | 33%; **67.3 to 72.3** |
+| without guesses, tok/s | 47.5, 47.8 | **56.5, 56.5** |
+| A simulated 4 GB card, 30K prompt: experts from VRAM; tok/s | 0%; 61.2 to 63.4 | 28%; 59.4 to 63.9 |
+| without guesses, tok/s | 46.6, 46.6 | **52.1, 51.6** |
+
+The RTX 3060 Laptop 6 GB with Qwen3.6 UD-Q4_K_M and the daily flags; the 4 GB card is this card with 2 GB held by
+`test_scripts/vram_hold.py --card 4096`. The answers move as much as between two runs without it (which experts the
+card computes and which the CPU moves the sums a little, as the cache's swaps already do): `test_scripts/quality.py`
+gave 1.07% and 1.33% of the steps' most likely token changed with it, 1.07% and 1.13% without, none that was 60% or
+more sure. It needs one card that maps VRAM a piece at a time and the swaps on (`--expert-swaps` above 0); it is off
+on several cards and with `--no-gpu-experts`. Setup writes it on one NVIDIA card, of any size, as `--elastic-prefill`
+(`poly_speedups()`); not on AMD cards, where it was not measured, nor on several cards. An install made before adds
+`"--lend-staging"` to the `args` of the model's config (`--update` does not add new options); an engine built before
+it stops at the unknown option, and setup leaves the option out of a config for such an engine and says so. On the
+simulated 4 GB card it was measured with `--graph-experts`, which setup leaves out under 5 GB; without it the loan
+was not measured. Every number: [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md), step 13. Not tested: a real 4 GB card,
+cards of 8 GB or more, AMD (HIP), Linux, Ornith 1.5, contexts past 37K on the whole card.

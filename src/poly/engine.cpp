@@ -360,6 +360,109 @@ struct Engine::Swap {
     cudaEvent_t done = nullptr;    // marks its upload
 };
 
+// The routing trace (STRATA_ROUTE_TRACE), little-endian records after a header:
+//   header  "SRT1", int32 version 1, layers, experts, experts a token, tail skip, window, expert swaps,
+//           kSwapHalf, float kSwapMin; per layer int64 slot bytes (0: never cached), int32 trade; per (layer,
+//           expert) int64 the profile's count
+//   'C'     int32 experts held, then a byte per (layer, expert): 1 if it is in the cache or on its way there.
+//           Written first and at the eval after the cache was filled, cut or grown (a swap keeps it as it was)
+//   'E'     an eval, before its follow(): int64 pos, int32 tokens, int64 the Stats' gpu_experts, cpu_experts,
+//           tail_experts and swapped_experts so far, int32 experts held, int64 their bytes, int32 each token
+//   'L'     a layer routed: int32 layer, int32 tokens, then each token's experts in the router's order, a byte
+//           each (two with more than 256 experts)
+struct Engine::Trace {
+    FILE* f = nullptr;
+    std::mutex m;
+    Clock::time_point flushed = Clock::now();
+    int held = -1;
+    std::vector<uint8_t> bytes;
+    ~Trace() {
+        if (f) std::fclose(f);
+    }
+    template <class T>
+    void put(T v) {
+        std::fwrite(&v, sizeof v, 1, f);
+    }
+};
+
+void Engine::trace_open() {
+    const char* path = std::getenv("STRATA_ROUTE_TRACE");
+    if (!path || !*path || n_moe_ == 0) return;
+    if (split_) {
+        std::fprintf(stderr, "strata-poly: STRATA_ROUTE_TRACE: one card only; no trace is written\n");
+        return;
+    }
+    auto t = std::make_unique<Trace>();
+    t->f = std::fopen(path, "wb");
+    if (!t->f) throw std::runtime_error(std::string("cannot write ") + path);
+    std::setvbuf(t->f, nullptr, _IOFBF, size_t(4) << 20);
+    std::fwrite("SRT1", 1, 4, t->f);
+    for (int v : {1, (int) layers_.size(), n_expert_, n_used_, opt_.tail_skip, opt_.window, opt_.expert_swaps,
+                  (int) swap_half_})
+        t->put((int32_t) v);
+    t->put(kSwapMin);
+    for (const Layer& L : layers_) {
+        t->put((int64_t) (L.trade >= 0 ? L.slot_bytes : 0));
+        t->put((int32_t) L.trade);
+    }
+    for (size_t i = 0; i < (size_t) layers_.size() * n_expert_; ++i)
+        t->put((int64_t) (i < prior_.size() ? prior_[i] : 0));
+    trace_ = std::move(t);
+    std::fprintf(stderr, "strata-poly: the routing goes to %s (STRATA_ROUTE_TRACE)\n", path);
+}
+
+void Engine::trace_eval(const int32_t* tokens, int n) {
+    Trace& t = *trace_;
+    std::lock_guard<std::mutex> l(t.m);
+    const size_t ne = (size_t) n_expert_;
+    t.bytes.assign(layers_.size() * ne, 0);
+    int held = 0;
+    int64_t held_bytes = 0;
+    for (size_t il = 0; il < layers_.size(); ++il) {
+        const Layer& L = layers_[il];
+        if (L.slot.empty()) continue;
+        for (size_t e = 0; e < ne; ++e) {
+            if (!L.slot[e] && (coming_.empty() || !coming_[il * ne + e])) continue;
+            t.bytes[il * ne + e] = 1;
+            ++held;
+            held_bytes += (int64_t) L.slot_bytes;
+        }
+    }
+    if (held != t.held) {
+        t.put('C');
+        t.put((int32_t) held);
+        std::fwrite(t.bytes.data(), 1, t.bytes.size(), t.f);
+        t.held = held;
+    }
+    t.put('E');
+    t.put((int64_t) pos_);
+    t.put((int32_t) n);
+    for (int64_t v : {stats_.gpu_experts, stats_.cpu_experts, stats_.tail_experts, stats_.swapped_experts}) t.put(v);
+    t.put((int32_t) held);
+    t.put(held_bytes);
+    for (int i = 0; i < n; ++i) t.put((int32_t) (tokens ? tokens[i] : -1));
+    if (ms_since(t.flushed) >= 1000.0) {
+        std::fflush(t.f);
+        t.flushed = Clock::now();
+    }
+}
+
+void Engine::trace_layer(int il, int m, const int32_t* ids) {
+    Trace& t = *trace_;
+    std::lock_guard<std::mutex> l(t.m);
+    t.put('L');
+    t.put((int32_t) il);
+    t.put((int32_t) m);
+    const size_t k = (size_t) m * n_used_;
+    if (n_expert_ <= 256) {
+        t.bytes.resize(k);
+        for (size_t i = 0; i < k; ++i) t.bytes[i] = (uint8_t) ids[i];
+        std::fwrite(t.bytes.data(), 1, k, t.f);
+    } else {
+        for (size_t i = 0; i < k; ++i) t.put((uint16_t) ids[i]);
+    }
+}
+
 Engine::Engine() = default;
 
 Engine::~Engine() {
@@ -385,6 +488,7 @@ Engine::~Engine() {
     for (Kv& k : kv_) vmm_free(k);
     vmm_free(arena_);
     vmm_free(wide_);
+    vmm_free(stage_vm_);
     for (void* p : host_allocs_) cudaFreeHost(p);
     for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1], ev_hr_})
         if (e) cudaEventDestroy((cudaEvent_t) e);
@@ -506,8 +610,30 @@ void Engine::vmm_unmap(Mapped& m, size_t bytes) {
         m.mapped -= n;
         m.pieces.pop_back();
         cu_ck(cuMemUnmap(m.base + m.mapped, n), "unmapping VRAM");
-        cu_ck(cuMemRelease(h), "unmapping VRAM");
+        if (vmm_kept_) vmm_kept_->emplace_back(h, n);
+        else cu_ck(cuMemRelease(h), "unmapping VRAM");
     }
+}
+
+void Engine::vmm_adopt(Mapped& m, std::vector<std::pair<unsigned long long, size_t>>& pieces, size_t bytes) {
+    CUmemAccessDesc access = {};
+    access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access.location.id = device_;
+    access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    for (const auto& [h, n] : pieces) {
+        const CUdeviceptr at = m.base + m.mapped;
+        if (m.mapped < bytes && m.mapped + n <= m.reserved && cuMemMap(at, n, 0, h, 0) == CUDA_SUCCESS) {
+            if (cuMemSetAccess(at, n, &access, 1) == CUDA_SUCCESS) {
+                m.pieces.emplace_back(h, n);
+                m.mapped += n;
+                continue;
+            }
+            cuMemUnmap(at, n);
+            (void) cudaGetLastError();
+        }
+        cuMemRelease(h);
+    }
+    pieces.clear();
 }
 
 // For the destructor: what is left of m, and its addresses, without throwing.
@@ -571,11 +697,87 @@ void Engine::settle_swaps() {
     follow(0);
 }
 
+// Options::lend_stage, at the first call of an answer (run()): the staging buffer's VRAM, which no call of fewer than
+// kStageRows tokens reads, is mapped at the expert cache's end instead.  Its slots are filled by follow(), with the
+// experts the answer uses most, and the cache's budget is that much larger.  Nothing waits for an upload.
+void Engine::lend_stage() {
+    if (loan_ || loan_off_ || !opt_.lend_stage || !vmm_ || split_ || !exp_ || !stage_vm_.base || n_swap_ == 0 ||
+        all_cached())
+        return;
+    const Clock::time_point t0 = Clock::now();
+    if (up_) ck(cudaStreamSynchronize(cs(up_)), "the staging buffer");   // st_ is done: run() waited for it
+    const size_t bytes = stage_vm_.mapped, held = arena_.mapped;
+    // the same VRAM, unmapped there and mapped here: new VRAM would be made resident again at its first use
+    vmm_kept_ = &loan_pieces_;
+    vmm_unmap(stage_vm_, 0);
+    vmm_kept_ = nullptr;
+    staged_il_ = -1;
+    vmm_adopt(arena_, loan_pieces_, held + bytes);
+    loan_ = arena_.mapped - held;
+    if (loan_ == 0) {
+        vmm_map(stage_vm_, bytes, kArenaPiece, "the expert staging buffer");
+        loan_off_ = true;
+        return;
+    }
+    if (trace_) trace_->held = -1;
+    ck(cudaMemset(exp_ + exp_at_, 0, arena_.mapped - exp_at_), "the expert cache");   // the slots' tails stay zero
+    // on top of what the cache and the attention caches hold now: on a card where no expert fitted at the start
+    // the attention caches grew past the budget from VRAM that was free, and cover() would take the loan for that
+    size_t had = held;
+    for (const Kv& k : kv_) had += k.mapped;
+    budget_ = std::max(budget_, had) + loan_;
+    ++stats_.loans;
+    stats_.lend_ms += ms_since(t0);
+    if (!loan_said_) {
+        loan_said_ = true;
+        std::fprintf(stderr, "strata-poly: --lend-staging: the staging buffer's %zu MiB are the expert cache's while "
+                             "an answer is written\n", loan_ >> 20);
+    }
+}
+
+// The staging buffer back, before a call of kStageRows tokens or more: the cache gives up what it needs to (the
+// experts it keeps are the ones used most, shrink_cache()) and the buffer is mapped where it was.
+void Engine::end_loan() {
+    loan_off_ = false;
+    if (!loan_) return;
+    const Clock::time_point t0 = Clock::now();
+    budget_ = budget_ > loan_ ? budget_ - loan_ : 0;
+    loan_ = 0;
+    const size_t want = stage_bytes_ + 256 + kTail;
+    size_t held = arena_.mapped;
+    for (const Kv& k : kv_) held += k.mapped;
+    size_t free_b = 0, total_b = 0;
+    ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    const size_t keep = (size_t(std::max(reserve_mib_, 0)) << 20) / 4 + up_to(want, grain_);
+    size_t cut = held > budget_ ? held - budget_ : 0;
+    if (free_b < keep) cut = std::max(cut, keep - free_b);
+    if (cut) {   // the VRAM the cache gives up is the buffer's again, what more it needs is new
+        vmm_kept_ = &loan_pieces_;
+        try {
+            shrink_cache(cut);
+        } catch (...) {
+            vmm_kept_ = nullptr;
+            throw;
+        }
+        vmm_kept_ = nullptr;
+        vmm_adopt(stage_vm_, loan_pieces_, want);
+    }
+    try {
+        vmm_map(stage_vm_, want, kArenaPiece, "the expert staging buffer");
+    } catch (const std::runtime_error&) {   // something else took VRAM meanwhile: the cache gives up the rest
+        shrink_cache(arena_.mapped);
+        vmm_map(stage_vm_, want, kArenaPiece, "the expert staging buffer");
+    }
+    staged_il_ = -1;
+    stats_.end_ms += ms_since(t0);
+}
+
 // The expert cache gives up `bytes` or a little more from its end, and loads nothing again: the experts whose
 // slots lie there and that were used more than cached ones before the cut take those ones' slots, as follow()
 // ranks them, and the others leave the cache.  `gone`, when given, gets the experts that left it, a layer's
 // number times n_expert_ plus the expert's.
 void Engine::shrink_cache(size_t bytes, std::vector<int64_t>* gone) {
+    if (trace_) trace_->held = -1;   // the trace's next eval says what is left
     size_t cut = arena_.mapped;
     for (size_t i = arena_.pieces.size(); i > 0 && arena_.mapped - cut < bytes; --i) cut -= arena_.pieces[i - 1].second;
     settle_swaps();
@@ -990,6 +1192,7 @@ int64_t Engine::vram_free_mib() const {
 // moves to the system's, and an answer came at 13 tokens/s where it comes at 30.
 void Engine::fill_expert_cache() {
     if (!opt_.gpu_experts || n_moe_ == 0) return;
+    if (trace_) trace_->held = -1;
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
     const size_t ram = ram_available(), files = gg_->bytes() + (dg_ ? dg_->bytes() : 0);
@@ -998,7 +1201,10 @@ void Engine::fill_expert_cache() {
     reserve_mib_ = opt_.vram_reserve_mib >= 0 ? std::max(opt_.vram_reserve_mib, 256)
                                              : default_reserve_mib(total_b, ram_tight_);
     const size_t reserve = size_t(reserve_mib_) << 20;
-    if (free_b <= reserve) return;
+    // Options::lend_stage: the cache's slots and addresses even when no expert fits beside the rest, for the
+    // staging buffer's VRAM to fill while an answer is written (lend_stage())
+    const bool lend = opt_.lend_stage && vmm_ && !split_;
+    if (free_b <= reserve && !lend) return;
 
     struct Cand {
         int il, e;
@@ -1037,19 +1243,22 @@ void Engine::fill_expert_cache() {
     n_trade_ = (int) sizes.size();
     // sized again (resize_cache()), it is no larger than load() made it, or than its addresses with VMM
     const size_t most = vmm_ ? std::min(all, total_b) : full_bytes_ > 0 ? full_bytes_ : all;
-    size_t arena = std::min({all, free_b - reserve, arena_.base ? arena_.reserved - 256 : most});
-    if (arena == 0) return;
+    size_t arena = std::min({all, free_b > reserve ? free_b - reserve : 0, arena_.base ? arena_.reserved - 256 : most});
+    if (arena == 0 && !lend) return;
     if (vmm_) {   // in pieces, so that it can give some up to the attention caches (shrink_cache()) and grow
         if (!arena_.base) vmm_reserve(arena_, most + 256);   // addresses only: grow_cache() maps more of them
-        try {
-            vmm_map(arena_, arena + 256, kArenaPiece, "the expert cache");
-        } catch (const std::runtime_error&) {   // the card may not have it all (grow_cache() is just as tolerant)
-            arena = arena_.mapped > 256 ? arena_.mapped - 256 : 0;
-            if (arena == 0) return;
+        if (arena > 0) {
+            try {
+                vmm_map(arena_, arena + 256, kArenaPiece, "the expert cache");
+            } catch (const std::runtime_error&) {   // the card may not have it all (grow_cache() is just as tolerant)
+                arena = arena_.mapped > 256 ? arena_.mapped - 256 : 0;
+                if (arena == 0 && !lend) return;
+            }
         }
         exp_ = (uint8_t*) arena_.base;
-        budget_ = free_b - reserve;   // when it holds every expert, what is left over goes to the rows first
-        for (const Kv& k : kv_) budget_ += k.mapped;
+        budget_ = free_b > reserve ? free_b - reserve : 0;   // when it holds every expert, what is left over goes to the
+        for (const Kv& k : kv_) budget_ += k.mapped;          // rows first
+        if (arena == 0) return;   // lend: the addresses alone, so far
     } else {
         exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
     }
@@ -1085,7 +1294,7 @@ void Engine::fill_expert_cache() {
 
 // The thread and the stream that bring experts into the cache while an answer is written (follow()).
 void Engine::start_swaps() {
-    if (swap_ || cached_ == 0 || opt_.expert_swaps == 0) return;
+    if (swap_ || (cached_ == 0 && !(opt_.lend_stage && exp_)) || opt_.expert_swaps == 0) return;
     swap_ = std::make_unique<Swap[]>((size_t) opt_.expert_swaps);
     cudaStream_t up = nullptr;
     ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
@@ -1109,6 +1318,7 @@ void Engine::resize_cache(int mib) {
 void Engine::resize_card_cache(int mib) {
     if (!opt_.gpu_experts || n_moe_ == 0) return;
     OnCard here(device_, split_);
+    end_loan();
     ck(cudaStreamSynchronize(cs(st_)), "resize");
     const auto failed = [&] {
         std::lock_guard<std::mutex> l(swap_m_);
@@ -1182,6 +1392,7 @@ void Engine::held_is_budget() {
 // keeps what was mapped.  Returns the experts it took.  The experts in `first` (as shrink_cache() lists them) come
 // before the others.
 int Engine::grow_cache(size_t bytes, const std::vector<int64_t>* first) {
+    if (trace_) trace_->held = -1;
     if (!vmm_ || !exp_) return 0;
     settle_swaps();
     ck(cudaStreamSynchronize(cs(st_)), "the expert cache");
@@ -1356,7 +1567,7 @@ void Engine::follow(int written) {
         n_free += s.at.load() == Swap::kFree;
     }
     if (written <= 0) return;
-    const float keep = std::exp2(-(float) written / (float) kSwapHalf);
+    const float keep = std::exp2(-(float) written / swap_half_);
     for (float& r : recent_) r *= keep;
     if (n_free == 0) return;
 
@@ -1393,16 +1604,44 @@ void Engine::follow(int written) {
         }
     }
 
+    // Options::lend_stage: the slots the staging buffer lends lie free at the cache's end, and the experts used
+    // most of any size take them first, giving none up.
+    trade_at_.assign((size_t) n_trade_, 0);
+    took_at_.assign((size_t) n_trade_, 0);
+    bool asked = false;
+    for (size_t room = loan_ && arena_.mapped >= exp_at_ + kTail ? arena_.mapped - kTail - exp_at_ : 0;
+         n_free > 0 && room > 0; --n_free) {
+        int best = -1;
+        for (int c = 0; c < n_trade_; ++c) {
+            const Pick& in = in_[(size_t) c * most + took_at_[(size_t) c]];
+            if (in.il >= 0 && layers_[(size_t) in.il].slot_bytes <= room && (best < 0 || in.recent >
+                                                                             in_[(size_t) best * most + took_at_[(size_t) best]].recent))
+                best = c;
+        }
+        if (best < 0) break;
+        const Pick in = in_[(size_t) best * most + took_at_[(size_t) best]++];
+        const size_t bytes = layers_[(size_t) in.il].slot_bytes;
+        Swap* s = nullptr;
+        for (int j = 0; j < n_swap_ && !s; ++j)
+            if (swap_[(size_t) j].at.load() == Swap::kFree) s = &swap_[(size_t) j];
+        s->il = in.il;
+        s->e = in.e;
+        s->slot = exp_ + exp_at_;
+        exp_at_ += bytes;
+        room -= bytes;
+        ++cached_;
+        coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
+        s->at.store(Swap::kAsked);
+        asked = true;
+    }
     // An upload goes to the size whose next pair gains most.  A cached expert that has given its slot is no
     // candidate to come in: it was used no more than the cached ones left.
-    trade_at_.assign((size_t) n_trade_, 0);
-    bool asked = false;
     for (; n_free > 0; --n_free) {
         int best = -1;
         float gain = 0.f;
         for (int c = 0; c < n_trade_; ++c) {
             const size_t k = (size_t) c * most + trade_at_[(size_t) c];
-            const Pick& in = in_[k];
+            const Pick& in = in_[k + took_at_[(size_t) c]];
             const Pick& out = out_[k];
             if (in.il < 0 || out.il < 0 || in.recent < 2.f * out.recent + kSwapMin) continue;
             if (best < 0 || in.recent - out.recent > gain) {
@@ -1413,7 +1652,7 @@ void Engine::follow(int written) {
         if (best < 0) break;
 
         const size_t k = (size_t) best * most + trade_at_[(size_t) best]++;
-        const Pick in = in_[k], out = out_[k];
+        const Pick in = in_[k + took_at_[(size_t) best]], out = out_[k];
         Swap* s = nullptr;
         for (int j = 0; j < n_swap_ && !s; ++j)
             if (swap_[(size_t) j].at.load() == Swap::kFree) s = &swap_[(size_t) j];
@@ -1575,8 +1814,16 @@ void Engine::load(const Options& o) {
     if (opt_.elastic_from > 0 && (!vmm_ || !mmq_ || split_ || !scratch_is_rows()))
         std::fprintf(stderr, "strata-poly: --elastic-prefill: this card or model does not take it; a prompt is read as "
                              "without it\n");
+    // STRATA_SWAP_HALF=N: the cache's recent uses halved every N written tokens in place of kSwapHalf, to measure
+    swap_half_ = (float) kSwapHalf;
+    if (const char* h = std::getenv("STRATA_SWAP_HALF"); h && std::atof(h) > 0) {
+        swap_half_ = (float) std::atof(h);
+        std::fprintf(stderr, "strata-poly: recent expert uses halved every %g written tokens (STRATA_SWAP_HALF)\n",
+                     (double) swap_half_);
+    }
     start_swaps();
     reset();
+    trace_open();
     // nothing is read from the files when every expert is in VRAM
     if (!all_cached())
         mapper_ = std::thread([this, spans = std::move(spans)] { map_pages(spans, map_quit_); });
@@ -1698,7 +1945,13 @@ void Engine::alloc() {
         // expert cache of a small card does without.
         stage_bytes_ = std::max(std::min((size_t) opt_.stage_mib << 20, (size_t) n_expert_ * one_expert), one_expert);
         chunk_bytes_ = std::max(kChunkBytes, one_expert);
-        stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256 + kTail, "the expert staging buffer");
+        if (opt_.lend_stage && vmm_ && !split_) {   // a piece at a time, so that the cache can have it (lend_stage())
+            vmm_reserve(stage_vm_, stage_bytes_ + 256 + kTail);
+            vmm_map(stage_vm_, stage_bytes_ + 256 + kTail, kArenaPiece, "the expert staging buffer");
+            stage_ = (uint8_t*) stage_vm_.base;
+        } else {
+            stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256 + kTail, "the expert staging buffer");
+        }
         for (int b = 0; b < 2; ++b) h_stage_[b] = (uint8_t*) hmalloc(chunk_bytes_, "pinned memory");
         for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_}) {
             cudaEvent_t ev = nullptr;
@@ -2034,11 +2287,13 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         CpuExpert host[kCpuRows * kMaxUsed];
         Cached cached[kCpuRows * kMaxUsed];
         int32_t host_e[kCpuRows * kMaxUsed], host_k[kCpuRows * kMaxUsed];   // a host entry's expert and its place
+        int32_t traced[kCpuRows * kMaxUsed];
         int n_host = 0, n_cached = 0;
         for (int t = 0; t < m; ++t) {
             int ids[kMaxUsed];
             float w[kMaxUsed];
             route(il, h_rl_ + (size_t) (at + t) * n_expert_, tok_ ? tok_[at + t] : -1, ids, w, route_tmp_.data());
+            if (trace_) std::copy(ids, ids + n_used_, traced + (size_t) t * n_used_);
             for (int k = 0; k < n_used_; ++k) {
                 const size_t e = (size_t) ids[k];
                 ++use_[(size_t) il * n_expert_ + e];
@@ -2053,6 +2308,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                                   L.exp_down + e * L.d_bytes, w[k], t};
             }
         }
+        if (trace_) trace_layer(il, m, traced);
         // Strata's STRATA_ROUTE_TAIL_SKIP: an expert outside VRAM that every token here ranks at tail_skip or later
         // adds little to any of them, so it is not computed.  The others keep the weights the router gave them.
         if (opt_.tail_skip > 0) {
@@ -2259,6 +2515,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             route(il, h_rl_ + (size_t) t * n_expert_, tok_ ? tok_[t] : -1, ids_.data() + (size_t) t * n_used_,
                   w + (size_t) t * n_used_, tmp);
     });
+    if (trace_) trace_layer(il, n, ids_.data());
     count_.assign((size_t) n_expert_, 0);
     for (int i = 0; i < rr; ++i) {
         ++count_[(size_t) ids_[(size_t) i]];
@@ -2498,10 +2755,13 @@ void Engine::run(const int32_t* tokens, int n) {
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
     if (pos_ + n > opt_.max_context)
         throw std::runtime_error("the context is full (" + std::to_string(opt_.max_context) + " tokens)");
+    if (loan_ && n >= kStageRows) end_loan();
     cover(pos_ + n);
 
     // h_r_ and h_cpu_ may still be the source of the previous call's copies
     ck(cudaStreamSynchronize(cs(st_)), "eval");
+    if (opt_.lend_stage && n < kStageRows) lend_stage();
+    if (trace_) trace_eval(tokens, n);
     if (n_swap_ > 0) follow(n < kStageRows ? n : 0);
     tok_ = tokens;
     const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row;
@@ -2786,12 +3046,14 @@ void Engine::turn_run(int n, bool halves) {
                 float* weights = (float*) (list + 16 + 12 * (size_t) list_most_);
                 CpuExpert host[kCpuRows * kMaxUsed];
                 int32_t host_e[kCpuRows * kMaxUsed], host_k[kCpuRows * kMaxUsed];
+                int32_t traced[kCpuRows * kMaxUsed];
                 int n_host = 0, n_cached = 0;
                 for (int t = 0; t < m; ++t) {
                     int ids[kMaxUsed];
                     float w[kMaxUsed];
                     route(il, h_rl_ + (size_t) (t0 + t) * n_expert_, tok_ ? tok_[t0 + t] : -1, ids, w,
                           route_tmp_.data());
+                    if (trace_) std::copy(ids, ids + n_used_, traced + (size_t) t * n_used_);
                     for (int j = 0; j < n_used_; ++j) {
                         const size_t e = (size_t) ids[j];
                         ++use_[(size_t) il * n_expert_ + e];
@@ -2808,6 +3070,7 @@ void Engine::turn_run(int n, bool halves) {
                                           L.exp_down + e * L.d_bytes, w[j], t};
                     }
                 }
+                if (trace_) trace_layer(il, m, traced);
                 if (opt_.weight_cut > 0.f) {   // before the card reads the cached ones' weights
                     float* cw[kCpuRows * kMaxUsed];
                     for (int i = 0; i < n_cached; ++i) cw[i] = weights + i;
@@ -3295,6 +3558,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     for (int k = 0; k < n_marks; ++k)
         if (marks[k].at <= (k ? marks[k - 1].at : 0) || marks[k].at >= n)
             throw std::logic_error("read: the marks rise, above 0 and below the tokens read");
+    if (trace_) trace_eval(tokens, n);   // its calls route a layer at a time: a record for the read as a whole
 
     // the calls: up to max_rows() tokens each, and none across a mark
     calls_.clear();
@@ -3307,6 +3571,12 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     }
     const int n_calls = (int) calls_.size();
     OnCard here(device_, split_);
+    if (loan_)   // a call of kStageRows tokens or more goes through the staging buffer
+        for (const Call& c : calls_)
+            if (c.m >= kStageRows) {
+                end_loan();
+                break;
+            }
     cover(pos_ + n);
     // Options::elastic_from: a long read in a wider batch, in VRAM the expert cache lends it meanwhile
     int stretch = 0;   // the most tokens between two marks: no call is longer, however wide the batch
