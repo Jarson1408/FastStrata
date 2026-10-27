@@ -10,6 +10,7 @@
 #include "engine.hpp"
 #include "guesses.hpp"
 #include "suffix_index.hpp"
+#include "strata/core/conversation_file.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/suffix_drafter.hpp"
@@ -24,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -53,6 +55,7 @@
 namespace {
 
 using strata::poly::CacheOptions;
+using strata::poly::ConversationDisk;
 using strata::poly::Conversations;
 using strata::poly::Engine;
 using strata::poly::Guesses;
@@ -70,6 +73,11 @@ constexpr double kProfileSaveMs = 10000.0;
 // The most tokens of a window whose guesses are the block's: the token the model has and three guesses, each
 // from the one before.  A repeat of the conversation may fill a longer window (Options::window).
 constexpr int kBlockWindow = 4;
+
+// --conversation-disk's files by default: a conversation of the whole 144K context with --kv-q8 takes about 2.0 GiB
+// (11.7 KiB a token and its six checkpoints' states of 63 MiB), so this holds it and another long one, or several
+// short ones (the agent benchmark's eight took 3.0 GiB), the latest used first.
+constexpr long long kDiskMib = 4096;
 
 // A window longer than that is for a copy: a repeat of the conversation whose match is this many tokens or more.
 // A repeat of a few tokens is in any text, and what followed it there is seldom what follows here for long.
@@ -300,6 +308,9 @@ struct CacheFlags {
     CacheOptions o;
     long long min_free_mib = 2560;   // parking leaves this much physical RAM free
     int64_t message = 0;             // --prompt-cache-message: the longest last message given a checkpoint; 0: none
+    std::string disk;                // --conversation-disk: the folder; empty: none
+    long long disk_mib = 0;          // what its files may take; 0: kDiskMib, or park_mib when that is less
+    long long disk_min_free_mib = 10240;   // and they leave this much of the volume free
 };
 
 struct Session {
@@ -584,6 +595,36 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
     return parse_ids(p, ids);
 }
 
+// --conversation-disk, after an answer: the conversation in the engine is held in RAM up to its last checkpoint,
+// and what the cache holds is handed to the disk's thread, which writes it while the next request is waited for.
+void keep_on_disk(Session& ss) {
+    ConversationDisk* disk = ss.flags.o.disk;
+    if (!disk) return;
+    try {
+        const Clock::time_point t0 = Clock::now();
+        ss.kept.hold();
+        const size_t n = ss.kept.store();
+        std::fprintf(stderr, "strata-poly: conversation disk: %zu conversations there (%llu MiB), %llu MiB to write; "
+                             "%.1f ms\n", n, (unsigned long long) (disk->held_bytes() >> 20),
+                     (unsigned long long) (disk->queued_bytes() >> 20), ms_since(t0));
+    } catch (const std::exception& e) {   // the card's, from copying the rows: this answer is not kept on disk
+        std::fprintf(stderr, "strata-poly: conversation disk: %s\n", e.what());
+    }
+}
+
+// --conversation-disk, at the end: what went to disk and came from it.
+void say_disk(Session& ss) {
+    ConversationDisk* disk = ss.flags.o.disk;
+    if (!disk) return;
+    const Clock::time_point t0 = Clock::now();
+    disk->flush();
+    const ConversationDisk::Totals t = disk->totals();
+    std::fprintf(stderr, "strata-poly: conversation disk: wrote %.1f MiB in %llu files in %.1f s (%.1f s waited for at "
+                         "the end), deleted %llu; read %.1f MiB in %.1f s\n", (double) t.written / (1 << 20),
+                 (unsigned long long) t.files, t.write_ms / 1000.0, ms_since(t0) / 1000.0,
+                 (unsigned long long) t.deleted, (double) t.read / (1 << 20), t.read_ms / 1000.0);
+}
+
 int serve(Session& ss) {
     Engine& engine = ss.engine;
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
@@ -717,6 +758,7 @@ int serve(Session& ss) {
                     (long long) r.resume, hits, hits + misses, (long long) r.read);
         std::fflush(stdout);
         ss.say_suffix(r);
+        keep_on_disk(ss);
         if (ms_since(saved) >= kProfileSaveMs) {
             try {
                 engine.save_profile();
@@ -734,6 +776,7 @@ int serve(Session& ss) {
                          "parked in %zu MiB, %zu pushed out; %lld MiB of VRAM free at the end\n",
                  ss.reused, ss.asked, ss.asked > 0 ? 100.0 * (double) ss.reused / (double) ss.asked : 0.0,
                  ss.kept.parked(), ss.kept.parked_bytes() >> 20, ss.kept.evictions(), (long long) engine.vram_free_mib());
+    say_disk(ss);
     return 0;
 }
 
@@ -765,6 +808,8 @@ int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures,
         },
         [](int64_t, int64_t, double, bool) {});
     std::printf("%s\n", out.c_str());
+    keep_on_disk(ss);
+    say_disk(ss);
     const strata::poly::Stats& st = ss.engine.stats();
     const double experts = (double) std::max<int64_t>(st.gpu_experts + st.cpu_experts, 1);
     std::fprintf(stderr,
@@ -875,6 +920,13 @@ void usage() {
                  "  --conversation-cache-min-tokens N   a conversation shorter than this is not parked (default 1024)\n"
                  "  --conversation-cache-min-free-mib N park only while this much physical RAM stays free (default\n"
                  "                         2560)\n"
+                 "  --conversation-disk DIR   keep what the conversation cache holds in DIR too, the conversation in\n"
+                 "                         the engine up to its last checkpoint after every answer, written in the\n"
+                 "                         background; the next engine of the same model, executable and options takes\n"
+                 "                         it up, so a restart does not read the conversations again (default: off)\n"
+                 "  --conversation-disk-mib N   what its files may take (default 4096, or\n"
+                 "                         --conversation-cache-mib when that is less)\n"
+                 "  --conversation-disk-min-free-mib N   and the disk keeps this much free beside them (default 10240)\n"
                  "  --eos-ids ID,ID,...    tokens that end a reply (default: the GGUF's eos, eot and eom)\n"
                  "  --temperature F --top-k N --top-p F --min-p F --seed N   sampling for --tokens (default greedy)\n"
                  "  --images FILE          with --tokens: the prompt's pictures, as strata-vision writes them\n"
@@ -895,6 +947,63 @@ void usage() {
                  "                         card runs the next layer, and added at its end; not the last layer's\n"
                  "                         (Expert Deferral; default 0 = none is)\n"
                  "environment: STRATA_ROUTE_TAIL_SKIP=N  in place of --tail-skip (0 turns it off)\n");
+}
+
+// --conversation-disk: what the files there are valid for (conversation_disk.hpp), a line each, its first word
+// saying what: the model's file and the draft model's (full path, size, last write), this engine's executable (its
+// size and a hash of its bytes, read once at the start), what a state and a row are, and the options that change
+// how they are computed.  Options that change only how fast (threads, --graph-experts, --cpu-multi, staging), what
+// is guessed, or the cache's own sizes are not in it.
+std::string disk_key(const Options& o, const Engine& e) {
+    namespace fs = std::filesystem;
+    const auto text = [](const fs::path& p) {
+        const std::u8string u = p.u8string();
+        return std::string(u.begin(), u.end());
+    };
+    const auto file = [&](const fs::path& given) {
+        std::error_code ec;
+        fs::path p = fs::absolute(given, ec);
+        if (ec) p = given;
+        if (const fs::path c = fs::weakly_canonical(p, ec); !ec) p = c;
+        const uintmax_t size = fs::file_size(p, ec);
+        const long long when = (long long) fs::last_write_time(p, ec).time_since_epoch().count();
+        return text(p) + " " + std::to_string(ec ? 0 : size) + " " + std::to_string(when);
+    };
+    fs::path exe;
+#ifdef _WIN32
+    std::wstring w(32768, L'\0');
+    w.resize(GetModuleFileNameW(nullptr, w.data(), (DWORD) w.size()));
+    exe = w;
+#else
+    std::error_code ec;
+    exe = fs::read_symlink("/proc/self/exe", ec);
+#endif
+    strata::core::SessionHasher h(0);
+    uint64_t size = 0;
+    if (std::ifstream f(exe, std::ios::binary); f) {
+        std::vector<char> b((size_t) 16 << 20);
+        while (f.read(b.data(), (std::streamsize) b.size()) || f.gcount() > 0) {
+            h.update(b.data(), (size_t) f.gcount());
+            size += (uint64_t) f.gcount();
+        }
+    }
+    char line[512];
+    std::string k = "strata-poly conversation disk 1\n";
+    k += "model " + file(o.model) + "\n";
+    if (!o.draft_model.empty()) k += "draft " + file(o.draft_model) + "\n";
+    std::snprintf(line, sizeof line, "engine %llu %016llx\n", (unsigned long long) size, (unsigned long long) h.digest());
+    k += line;
+    std::snprintf(line, sizeof line, "cache state=%zu row=%zu kv_q8=%d kv_q4=%d context=%d\n", e.state_bytes(),
+                  e.row_bytes(), (int) o.kv_q8, o.kv_q4, o.max_context);
+    k += line;
+    std::snprintf(line, sizeof line, "read prompt_batch=%d elastic_prefill=%d elastic_batch=%d\n", o.prompt_batch,
+                  o.elastic_from, o.elastic_batch);
+    k += line;
+    std::snprintf(line, sizeof line, "compute tail_skip=%d weight_cut=%g defer_experts=%d attn_split=%d gpu_experts=%d "
+                                     "layer_split=%s\n", o.tail_skip, (double) o.weight_cut, o.defer_from,
+                  (int) o.attn_split, (int) o.gpu_experts, o.layer_split.c_str());
+    k += line;
+    return k;
 }
 
 }  // namespace
@@ -977,6 +1086,9 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-slots") cache.o.park_slots = std::atoi(val());
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
+        else if (a == "--conversation-disk") cache.disk = val();
+        else if (a == "--conversation-disk-mib") cache.disk_mib = std::atoll(val());
+        else if (a == "--conversation-disk-min-free-mib") cache.disk_min_free_mib = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
         else if (a == "--images") images = val();
         else if (a == "--image-pad") image_pad = std::atoi(val());
@@ -1036,7 +1148,8 @@ int main(int argc, char** argv) {
     const long long most = 1LL << 24;   // MiB: 16 TiB
     if (cache.o.checkpoints < 0 || cache.o.every < 0 || cache.o.park_mib < 0 || cache.o.park_mib > most ||
         cache.o.park_slots < 0 || cache.o.park_slots > 1024 || cache.o.park_min < 0 || cache.min_free_mib < 0 ||
-        cache.min_free_mib > most) {
+        cache.min_free_mib > most || cache.disk_mib < 0 || cache.disk_mib > most || cache.disk_min_free_mib < 0 ||
+        cache.disk_min_free_mib > most) {
         std::fprintf(stderr, "strata-poly: a cache option is negative or too large\n");
         return 2;
     }
@@ -1046,6 +1159,7 @@ int main(int argc, char** argv) {
     }
 
     std::unique_ptr<Engine> loaded;
+    std::unique_ptr<ConversationDisk> disk;   // after the session that names it is gone, its writes are finished
     try {
         const Clock::time_point t0 = Clock::now();
         loaded = Engine::open(o);
@@ -1095,7 +1209,32 @@ int main(int argc, char** argv) {
             if (!corpus.empty()) std::fprintf(stderr, ", %lld sequences of %lld tokens from --suffix-corpus", lines, tokens);
             std::fprintf(stderr, "\n");
         }
+        std::vector<strata::poly::StoredConversation> stored;
+        const Clock::time_point disk_t0 = Clock::now();
+        const long long disk_mib = cache.disk_mib > 0 ? cache.disk_mib : std::min<long long>(kDiskMib, cache.o.park_mib);
+        if (!cache.disk.empty() && (cache.o.park_mib < 1 || cache.o.park_slots < 1)) {
+            std::fprintf(stderr, "strata-poly: --conversation-disk keeps what the conversation cache holds, and it is "
+                                 "off (--conversation-cache-mib or --conversation-cache-slots 0): nothing goes to disk\n");
+        } else if (!cache.disk.empty()) {
+            ConversationDisk::Settings d;
+            d.dir = ConversationDisk::subfolder(std::filesystem::path(cache.disk), std::filesystem::path(o.model));
+            d.key = disk_key(o, engine);
+            d.limit = (uint64_t) disk_mib << 20;
+            d.min_free = (uint64_t) cache.disk_min_free_mib << 20;
+            d.log = stderr;
+            disk = std::make_unique<ConversationDisk>();
+            if (disk->open(d, stored)) cache.o.disk = disk.get();
+        }
         Session ss(engine, eos, cache, lookup, suffix.get());
+        if (cache.o.disk) {
+            long long tokens = 0;
+            for (const strata::poly::StoredConversation& c : stored) tokens += (long long) c.seq.size();
+            const size_t found = stored.size(), taken = ss.kept.adopt(std::move(stored));
+            std::fprintf(stderr, "strata-poly: conversation disk: %s: %zu of %zu conversations (%lld tokens) taken up, "
+                                 "read when a prompt goes back to them; %llu MiB there, up to %lld; %.0f ms\n",
+                         cache.disk.c_str(), taken, found, tokens, (unsigned long long) (disk->held_bytes() >> 20),
+                         disk_mib, ms_since(disk_t0));
+        }
         int rc = 0;
         if (want_serve) {
             rc = serve(ss);

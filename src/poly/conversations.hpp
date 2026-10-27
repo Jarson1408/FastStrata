@@ -5,7 +5,8 @@
 // recurrent state at that point, which is a checkpoint, and the rows its tokens left in the attention caches.  The
 // rows of the sequence in the engine are there already.  A conversation that makes room for another is parked:
 // its rows are copied to host memory, up to its last checkpoint.  What is saved is written once and never changed,
-// so conversations that start alike share it, and a parked conversation comes back bit for bit.
+// so conversations that start alike share it, and a parked conversation comes back bit for bit.  With a disk
+// (--conversation-disk, conversation_disk.hpp) all of it is copied there too, and the next engine takes it up.
 //
 // Nothing here knows the model.  E is the engine:
 //     void reset();
@@ -14,6 +15,8 @@
 //     void load_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n);
 #pragma once
 
+#include "conversation_disk.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -21,6 +24,7 @@
 #include <functional>
 #include <memory>
 #include <new>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -46,6 +50,7 @@ struct CacheOptions {
     int64_t park_min = 1024;   ///< a conversation with fewer tokens before its last checkpoint is not parked
     std::function<bool(size_t)> admit;   ///< whether the host can spare this many bytes; unset: it can
     FILE* log = nullptr;       ///< where parking is reported; the server reads these lines
+    ConversationDisk* disk = nullptr;    ///< where what is parked is kept for the next engine too; null: nowhere
 };
 
 template<class E>
@@ -63,9 +68,15 @@ public:
         turn_ = message_ = -1;
         size_t best = cur_;
         int64_t at = 0, same = 0;
-        for (size_t i = 0; i < slots_.size(); ++i) {
-            const int64_t c = common(slots_[i].seq, ids), r = reach(i, c, n);
-            if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
+        for (bool found = false; !found;) {
+            best = cur_, at = 0, same = 0;
+            for (size_t i = 0; i < slots_.size(); ++i) {
+                const int64_t c = common(slots_[i].seq, ids), r = reach(i, c, n);
+                if (r > at || (r == at && i == cur_)) best = i, at = r, same = c;
+            }
+            // what coming back there reads is in RAM; a conversation from the disk whose files cannot be read is
+            // dropped, and the next best is taken
+            found = at == 0 || ready(best, at);
         }
         ++clock_;
         if (at == 0) {
@@ -178,6 +189,11 @@ public:
             return 0;
         }
         const int64_t at = s.marks.back().pos;
+        if (!load(*s.marks.back().state)) {
+            slots_[cur_] = Slot{};
+            e_.reset();
+            return 0;
+        }
         cut(s, at);
         e_.load_state(s.marks.back().state->p.get(), at);
         return at;
@@ -190,6 +206,112 @@ public:
         due_.clear();
     }
 
+    /// With a disk, after an answer: the rows the conversation in the engine has only there, up to its last
+    /// checkpoint, are copied to host memory as parking would copy them, so that store() can put it on disk before
+    /// it is parked; parking it then copies only what it read after that.  They count in the budget as soon as
+    /// they are held, and the conversation is not parked for it.
+    void hold() {
+        Slot& s = cur();
+        if (!o_.disk || o_.park_mib < 1 || o_.park_slots < 1 || s.marks.empty() || s.marks.back().pos < o_.park_min)
+            return;
+        const int64_t end = s.marks.back().pos, from = saved(s);
+        if (from >= end) return;
+        const Clock::time_point t0 = Clock::now();
+        const size_t bytes = (size_t) (end - from) * e_.row_bytes();
+        const BlobPtr b = fit(bytes, slots_.size(), false) ? blob(bytes) : nullptr;
+        if (b) {
+            e_.save_rows(from, end - from, b->p.get());
+            s.rows.push_back({b, from, end - from, end - from});
+        }
+        if (o_.log)
+            std::fprintf(o_.log, "strata-poly: conversation disk: %s %lld rows (%.1f MiB) of the conversation in the "
+                                 "engine in %.1f ms\n", b ? "held" : "no room to hold", (long long) (end - from),
+                         (double) bytes / (1 << 20), std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+    }
+
+    /// With a disk: what the cache holds goes there (ConversationDisk::commit()), the latest used first, each
+    /// conversation up to the last checkpoint its saved rows reach.  Returns how many are there then.
+    size_t store() {
+        if (!o_.disk) return 0;
+        std::vector<size_t> order;
+        for (size_t i = 0; i < slots_.size(); ++i)
+            if (!slots_[i].seq.empty()) order.push_back(i);
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return slots_[a].stamp > slots_[b].stamp; });
+        std::vector<ConversationDisk::Want> want;
+        for (const size_t i : order) {
+            Slot& s = slots_[i];
+            const int64_t end = saved(s);
+            ConversationDisk::Want w;
+            for (const Checkpoint& m : s.marks)
+                if (m.pos <= end) {
+                    w.c.marks.push_back({m.pos, file_of(*m.state), m.state->bytes});
+                    w.blobs.push_back(source(m.state));
+                }
+            if (w.c.marks.empty()) continue;
+            const int64_t last = w.c.marks.back().pos;
+            if (!s.disk) s.disk = o_.disk->new_id();
+            w.c.id = s.disk;
+            w.c.stamp = s.stamp;
+            w.c.prompt = std::min(s.prompt, last);
+            w.c.seq.assign(s.seq.begin(), s.seq.begin() + (std::ptrdiff_t) last);
+            for (const Rows& r : s.rows) {
+                if (r.first >= last) break;
+                w.c.rows.push_back({file_of(*r.blob), r.blob->bytes, r.first, r.count, std::min(r.keep, last - r.first)});
+                w.blobs.push_back(source(r.blob));
+            }
+            want.push_back(std::move(w));
+        }
+        return o_.disk->commit(std::move(want));
+    }
+
+    /// With a disk: the conversations an engine before this one left there come back as parked ones, the latest
+    /// used first while there are slots and budget for them; store() then deletes the files of the others.  What
+    /// they hold is read when a prompt first goes back to them (ready()).  Returns how many came back.
+    size_t adopt(std::vector<StoredConversation> list) {
+        if (!o_.disk) return 0;
+        std::sort(list.begin(), list.end(), [](const StoredConversation& a, const StoredConversation& b) {
+            return a.stamp > b.stamp;
+        });
+        std::unordered_map<uint64_t, BlobPtr> files;
+        const auto on_disk = [&](uint64_t file, uint64_t bytes) {
+            BlobPtr& b = files[file];
+            if (!b) {
+                b = std::make_shared<Blob>();
+                b->bytes = (size_t) bytes;
+                b->file = file;
+            }
+            return b;
+        };
+        const size_t budget = (size_t) o_.park_mib << 20;
+        std::vector<size_t> taken;
+        for (StoredConversation& c : list) {
+            const size_t at = (cur_ + 1 + taken.size()) % slots_.size();
+            if (taken.size() >= (size_t) o_.park_slots || at == cur_) break;
+            bool fits = true;
+            for (const StoredConversation::Mark& m : c.marks) fits = fits && m.bytes == e_.state_bytes();
+            for (const StoredConversation::Rows& r : c.rows) fits = fits && r.bytes == (uint64_t) r.count * e_.row_bytes();
+            if (!fits) continue;
+            Slot s;
+            s.seq = std::move(c.seq);
+            s.prompt = c.prompt;
+            s.disk = c.id;
+            for (const StoredConversation::Mark& m : c.marks) s.marks.push_back({m.pos, on_disk(m.file, m.bytes)});
+            for (const StoredConversation::Rows& r : c.rows)
+                s.rows.push_back({on_disk(r.file, r.bytes), r.first, r.count, r.keep});
+            slots_[at] = std::move(s);
+            if (held(slots_.size()).bytes > budget) {
+                slots_[at] = Slot{};
+                continue;
+            }
+            taken.push_back(at);
+        }
+        // the order they were used in, the latest last, before anything this engine does
+        for (size_t j = 0; j < taken.size(); ++j) slots_[taken[j]].stamp = taken.size() - j;
+        clock_ = taken.size();
+        store();
+        return taken.size();
+    }
+
     /// The parked conversations, the bytes they hold, and how many were pushed out so far.
     size_t parked() const { return held(slots_.size()).count; }
     size_t parked_bytes() const { return held(slots_.size()).bytes; }
@@ -199,10 +321,11 @@ private:
     using Clock = std::chrono::steady_clock;
 
     struct Blob {
-        std::unique_ptr<uint8_t[]> p;
+        std::unique_ptr<uint8_t[]> p;   // null: the blob is on disk only, until load() reads it
         size_t bytes = 0;
+        uint64_t file = 0;              // its file on disk; 0: none
     };
-    using BlobPtr = std::shared_ptr<const Blob>;
+    using BlobPtr = std::shared_ptr<Blob>;
     struct Checkpoint {
         int64_t pos;
         BlobPtr state;
@@ -218,6 +341,7 @@ private:
         std::vector<Checkpoint> marks;  // by position
         std::vector<Rows> rows;         // back to back from row 0; a parked conversation has all of its rows
         uint64_t stamp = 0;
+        uint64_t disk = 0;              // its file on disk; 0: none
     };
     struct Held {
         size_t count = 0, bytes = 0;
@@ -316,13 +440,15 @@ private:
     // Makes the parked conversations, the current one among them and `extra` bytes more, fit the budget and the
     // slots.  The least recently used goes first, whatever its length: a long conversation can lose its place to
     // several short ones.  Slot `keep` stays; it is the one about to take the engine, if any, so it frees a slot.
+    // `parks` false: the current one stays in the engine (hold()) and takes no slot.
     // False: it does not fit, or the host cannot spare the bytes.
-    bool fit(size_t extra, size_t keep) {
+    bool fit(size_t extra, size_t keep, bool parks = true) {
         const size_t budget = (size_t) o_.park_mib << 20;
         for (;;) {
             const Held h = held(cur_);
             const size_t leaving = keep < slots_.size() && keep != cur_ && !slots_[keep].seq.empty() ? 1 : 0;
-            if (h.bytes + extra <= budget && h.count - leaving <= (size_t) o_.park_slots) break;
+            const size_t staying = !parks && !cur().seq.empty() ? 1 : 0;
+            if (h.bytes + extra <= budget && h.count - leaving - staying <= (size_t) o_.park_slots) break;
             size_t out = slots_.size();
             for (size_t i = 0; i < slots_.size(); ++i)
                 if (i != cur_ && i != keep && !slots_[i].seq.empty() &&
@@ -407,6 +533,50 @@ private:
         slots_[to] = std::move(b);
         cur_ = to;
         return true;
+    }
+
+    // Slot i's blobs that coming back to `at` reads: its state there, and its rows before it unless it is in the
+    // engine.  Those that are on disk only are read now.  False: one could not be read, and the slot is dropped.
+    bool ready(size_t i, int64_t at) {
+        std::vector<Blob*> need;
+        for (const Checkpoint& m : slots_[i].marks)
+            if (m.pos == at && !m.state->p) need.push_back(m.state.get());
+        if (i != cur_)
+            for (const Rows& r : slots_[i].rows)
+                if (r.first < at && !r.blob->p) need.push_back(r.blob.get());
+        if (need.empty()) return true;
+        const Clock::time_point t0 = Clock::now();
+        size_t bytes = 0;
+        bool ok = true;
+        for (Blob* b : need) {
+            ok = ok && load(*b);
+            bytes += b->bytes;
+        }
+        if (o_.log)
+            std::fprintf(o_.log, "strata-poly: conversation disk: %s %.1f MiB of a conversation of %lld tokens in "
+                                 "%.1f ms\n", ok ? "read" : "could not read (dropped it)", (double) bytes / (1 << 20),
+                         (long long) at, std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+        if (!ok) slots_[i] = Slot{};
+        return ok;
+    }
+
+    // A blob in RAM, read from its file when it is on disk only.  False: it could not be.
+    bool load(Blob& b) {
+        if (b.p) return true;
+        if (!o_.disk || !b.file) return false;
+        b.p.reset(new (std::nothrow) uint8_t[b.bytes]);
+        if (b.p && o_.disk->read_blob(b.file, b.bytes, b.p.get())) return true;
+        b.p.reset();
+        return false;
+    }
+
+    // A blob's file on disk, named now if it has none.
+    uint64_t file_of(Blob& b) {
+        if (!b.file) b.file = o_.disk->new_id();
+        return b.file;
+    }
+    static ConversationDisk::Source source(const BlobPtr& b) {
+        return {b->file, b->bytes, std::shared_ptr<const void>(b, b->p.get()), b->p.get()};
     }
 
     // `with` is the current slot when its conversation is the one just parked.

@@ -17,7 +17,7 @@ FastStrata is the third project in a line:
 | --- | --- | --- |
 | [Strata](https://github.com/Niko1221/Strata) | Niko1221 and contributors | The original. The `strata` engine runs Qwen3.8-Flash-Next, a model of 24,576 experts of which each word needs 10: the graphics card keeps the experts asked for most and learns which those are as you use it, every expert sits in RAM and the processor computes the ones the card lacks at the same time, and a draft layer guesses the next words for the model to check. Around it: the one-click installer, a server with an OpenAI- and Anthropic-compatible API, and a web app with a chat and a live monitor. |
 | [PolyStrata](https://github.com/VecSzn/PolyStrata) | VecSzn | Adds a second engine, `strata-poly`, which reads a model's GGUF file where it lies, with no second copy: GLM 5.3 Flash first, then Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4, Tiel Coder and DeepSeek V4 Flash. The dense weights live in VRAM; the routed experts are split between a VRAM cache, filled by how much each expert is used and following what an answer uses, and the CPU, which computes the others from RAM while the card does its share. The model's own draft (MTP) block guesses up to three tokens ahead, and the model checks them in one pass. |
-| **FastStrata** | this fork | Narrows PolyStrata to the two models above that fit a gaming PC, Qwen3.6-35B-A3B and Ornith 1.5, four presets in all, and makes `strata-poly` fast on a small card: thirteen measured steps, eleven changes to the engine and its settings ([below](#what-faststrata-changed)). |
+| **FastStrata** | this fork | Narrows PolyStrata to the two models above that fit a gaming PC, Qwen3.6-35B-A3B and Ornith 1.5, four presets in all, and makes `strata-poly` fast on a small card: fourteen measured steps, twelve changes to the engine and its settings ([below](#what-faststrata-changed)). |
 
 PolyStrata kept the attention cache in 16 bits, 22 KB a token for Qwen3.6, which holds 72K on a 6 GB card. FastStrata
 added an 8-bit cache, `--kv-q8` (2026-10-17, 11.7 KB a token: 144K on the 6 GB card), and a 4-bit one, `--kv-q4`
@@ -50,6 +50,7 @@ two runs of one build.
 | 12 | (measured) | Which experts the cache should hold: a routing trace (`STRATA_ROUTE_TRACE`) and a simulator of cache rules, checked against the engine's own counts. | No rule that does not know the future was more than 3% better than the engine's; tables by kind of work (code, documents) did not help. | |
 | 13 | `--lend-staging` | The prompt batches' staging buffer (500 MiB) holds cached experts while an answer is written, and goes back before the next batch. | The agent benchmark 85.0 and 83.9 tok/s where 82.1 and 82.0; a simulated 4 GB card a third of the experts from VRAM where none, 11-19% faster without guesses. | Lossless: as between two runs without it. |
 | 15 | pieces of 64 MiB; `--stage-next` | A layer's experts copied to the card in pieces, the host's copy under the card's (always on); with `--stage-next` a second staging buffer the expert cache lends a prompt's read, the next layer's experts copied while a layer runs. | An agent's 1,501-token turn after 38K read in 5.0 s with the pieces and 3.9 s with `--stage-next`, where 6.4; the agent benchmark's prompts 90 and 79.6 s where 108. | The pieces: the same tokens. `--stage-next`: as between two runs without it. |
+| 17 | `--conversation-disk` | The parked conversations on disk too, written in the background after every answer, so that an engine restart (the Gateway's Stop or close, a model swap) does not read them again. | The next turn of a 40K conversation after a restart 5.5 s where 40.0, of a 70K one 7.2 s where 83.0; the agent benchmark as fast as without it. | Lossless: the tokens after a restart are those without one. |
 
 `--tail-skip 6`, which leaves out an expert outside VRAM that every token of a window ranks seventh or eighth, is
 PolyStrata's setting for Qwen3.6 and stays: x1.15 on the same text for a mean KL of 0.0060 (step 6). Ornith 1.5 runs
@@ -275,6 +276,7 @@ Setup writes the engine's options into the model's run config, `strata-<family>-
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
 --elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
 --conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048
+--conversation-disk <the data folder>\conversations --conversation-disk-mib 4096
 ```
 
 Each where the PC and the preset take it, and setup prints each with what it gave:
@@ -293,6 +295,7 @@ Each where the PC and the preset take it, and setup prints each with what it gav
 | `--kv-q4`, then `--kv-q4-keys q4` | NVIDIA, only where even `--kv-q8` with batches of 512 does not fit; setup says what it costs and asks |
 | conversation cache 12 GiB, 8 slots | a PC with 24 GB of RAM beyond what the preset wants |
 | `--prompt-cache-message 2048` | NVIDIA |
+| `--conversation-disk`, `--conversation-disk-mib 4096` | NVIDIA, with the conversation cache on, where the data folder's disk has 20 GB free |
 
 - **All speedups off:** `START-HERE.bat --setup --speedups off` (`./setup.sh --setup --speedups off`) writes the
   config as PolyStrata's setup did, and later setup runs keep that choice; `--speedups on` turns them on again. One

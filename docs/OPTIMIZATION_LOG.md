@@ -1782,22 +1782,223 @@ calls (a checkpoint every 2,048 tokens): 2,460 tokens 3.91, 3.90 -> 3.66, 3.53 s
   other cards, a 4 GB card (where the cache has little to lend: the buffer then comes from VRAM below the reserve, as
   in the 5,000-token turn), AMD (HIP), Linux, Ornith 1.5, several cards (it is off there).
 
+## 16. The main path on v0.5.0, and where the guesses come from (2026-10-26, kv-q8 eb5cde55; no engine change)
+
+FastStrata's main path is Qwen3.6 Q4 (UD-Q4_K_M) with the 8-bit context cache (`--kv-q8`); UD-Q3_K_M and the 4-bit
+cache are options measured after it (the user's decision, 2026-10-26). This step measures that path on the v0.5.0
+engine as a reference for what comes next: `build-poly` from kv-q8, source `18fea077de671e9d`, the daily install's
+engine; the daily config's flags (`--max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8
+--attn-split --graph-experts --elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
+--prompt-cache-message 2048`), a fresh copy of the expert profile every run, `STRATA_CPU_STATS=1`. The RTX 3060 Laptop
+6 GB, nothing else on the card.
+
+| Prompt (`run_serve.py`) | Read in | Writing: tok/s; ms a window | Experts from VRAM | The CPU's experts |
+| --- | --- | --- | --- | --- |
+| 1,976 tokens, 300 written, two runs | 19.4 s (the model file not yet in the OS cache), 3.6 s | 67.4, 71.0; 29.4, 26.8 | 64.3%, 63.2% | 1.88 s (the second run) |
+| 37,433 tokens, 250 written, two runs | 33.5 s, 33.5 s (1,117 tok/s) | 62.2, 63.0; 33.1, 32.9 | 57.6%, 58.7% | 1.87 s (the first run) |
+| 139,056 tokens, 400 written, one run | 237.4 s (586 tok/s) | 55.5; 38.9 | 36.3% | 3.26 s |
+
+The agent benchmark, two runs: all 35 answers at 81.9 and 84.3 tok/s (every written token over all the decode time),
+2.21 and 2.24 tokens right a window; the prompts 84.4 and 85.4 s, the decode 71.1 and 67.7 s, of it the CPU's
+experts 52.8 and 50.2 s (74%). Step 15's 79.6 s of prompts ran without `--prompt-cache-message`, which the
+benchmark has no gateway frame for; step 11 measured it at about 0.15 s a prompt there, about 5 s for 35 prompts (not
+measured in turns here).
+
+**Where the guesses come from** (the agent benchmark's 70 answers by what they are, the tokenizer reading each one;
+the day of step 12's prompts, `trace_run.py`, 400 tokens an answer):
+
+| Text | Answers, tokens | Tokens right a window | Of the guesses offered, right | tok/s |
+| --- | --- | ---: | ---: | ---: |
+| Tool calls (agent benchmark) | 52, 7,778 | 3.22 | 87% | 89.4 |
+| Other text in the agent's session | 10, 1,753 | 1.82 | 82% | 73.7 |
+| A plain chat | 8, 2,006 | 0.80 | 81% | 71.7 |
+| A tool call (day) | 1, 399 | 3.29 | 90% | 94.4 |
+| Code: an edit, a test file (day) | 2, 798 | 1.51 | 86% | 84.7 |
+| Code explained in words (day) | 2, 798 | 1.19 | 81% | 75.0 |
+| Documents in Polish (day) | 6, 2,394 | 0.96 | 77% | 77.1 |
+| Documents in English (day) | 2, 690 | 1.45 | 85% | 77.0 |
+
+- **What the engine guesses is right 77 to 90% of the time, whatever the text; what differs is how much it dares to
+  guess.** A tool call gets 3.2 tokens right a window, prose 0.8 to 1.0. The draft block guesses up to 3 tokens and
+  the suffix index adds what repeats, so tool calls have little left to gain, and prose would need a better guesser,
+  not a bolder policy: the guesses it does not make are the ones it would get wrong.
+- So drafts from a tool call's structure (JSON keys, brackets) are put back: tool calls already write at 89-94 tok/s.
+- The CPU's experts are still three quarters of the decode in the agent benchmark: what the cache holds and the RAM's
+  speed set the writing speed on this laptop.
+
+## 17. Parked conversations kept through an engine restart: `--conversation-disk` (2026-10-26 and 27, branch `poly/conv-disk`)
+
+**Why.** Of the time the user's sessions of 21 to 23.10 spent reading prompts from their first token, 60% came after
+an engine restart in a conversation in progress (step 14): 13 to 107 s a time, 69.5K tokens in 108 s. The
+conversation cache is in the engine's RAM, and the engine is not asked to quit: the FastStrata Gateway ends the server
+with `taskkill /F /T` (`_stop_polystrata_server()` in its `gateway/app.py`, at a model swap, at its close and at Stop),
+which takes the engine down with the server, and a PC that restarts ends it too. So a save at exit would not do; the
+cache has to be on disk before the end comes. Coming back costs little once the bytes are there: a conversation
+parked in RAM comes back in 10 to 130 ms.
+
+**The change.** With **`--conversation-disk DIR`** the engine keeps a copy of what its conversation cache holds in
+`DIR`, and the next engine of the same model takes it up.
+
+- After every answer (after its DONE line), the conversation in the engine has the rows it holds only in VRAM, up to
+  its last checkpoint, copied to RAM as parking would copy them (`Conversations::hold()`), so they count in
+  `--conversation-cache-mib` from then on and parking it later copies only what it read after that. Then what the
+  cache holds is handed to a thread of the disk's (`ConversationDisk::commit()`, `src/poly/conversation_disk.cpp`),
+  which writes it while the next request is waited for or read. The answer's own tokens, past the last checkpoint,
+  are not kept, as parking does not keep them.
+- The files mirror the cache: one for every blob (a checkpoint's state, a run of rows), which the conversations that
+  share it share, and one for every conversation, naming its tokens up to its last checkpoint and its blobs. A blob
+  is written once and never changed; every file is written under another name and renamed when whole, a
+  conversation's after its blobs, and the blobs no conversation names any more are deleted after that, so an engine
+  ended at any point leaves the last whole set. A file has a header and a checksum (Strata's `SessionHasher`, seeded
+  with the key and the file's id). The thread runs at background priority for the CPU, the disk and the memory
+  (`THREAD_MODE_BACKGROUND_BEGIN`): the pages it writes are the first Windows lets go, not the model's.
+- At a start the engine takes the conversations whose files are all there and of their size as parked ones, the
+  latest used first while `--conversation-cache-slots` and `--conversation-cache-mib` take them. Their bytes are read
+  when a prompt first goes back to one (`ready()`), and their checksums checked then; a conversation with a blob
+  missing or not as written is dropped there, and the prompt goes to the next best place, as without it.
+- What the files are valid for: a subfolder of `DIR` for each model file (its name and a hash of its path), and in it
+  `key.txt`: the model's file and the draft model's (path, size, last write), the engine's executable (its size and a
+  hash of its bytes, read at the start), the bytes of a state and a row, `--kv-q8` / `--kv-q4`, `--max-context`,
+  `--prompt-batch`, `--elastic-prefill` and `--elastic-batch`, and what changes how the model computes (`--tail-skip`,
+  `--weight-cut`, `--defer-experts`, `--attn-split`, `--no-gpu-experts`, `--layer-split`). Where the key differs, the
+  subfolder's files are deleted. Options that change only how fast it goes (threads, `--graph-experts`,
+  `--cpu-multi`, staging), what is guessed, or the cache's sizes are not in it. A lock file keeps a second engine
+  out of a subfolder in use: that one runs without the disk and says so.
+- Room: `--conversation-disk-mib N` (default 4,096, or `--conversation-cache-mib` when that is less; the runs below
+  were made with the daily 12,288, before that default, and never held more than 3.1 GiB), and
+  `--conversation-disk-min-free-mib N` of the volume kept free besides the files (default 10,240), looked at every
+  time: the latest used go first, the oldest are left out. So each PC holds what its disk has room for.
+- It needs `--conversation-cache-mib` and slots: it keeps what the cache holds. Without the flag nothing of it runs
+  (`hold()`, `store()` and `adopt()` return at once, and every blob is in RAM as before).
+- `conversations_test` (`glm_conversations_test`, the fake engine whose state is a hash of the tokens read) restarts
+  the engine and the cache at random points of the random prompt orders of `any_order()`, the reads given up part
+  way among them: the engine always holds what reading the prompt from its first token gives. Also a key that
+  changed, a conversation's file cut short, a garbled blob, a file left half written, the lock and the limit.
+  64,029 checks (55,321 before).
+
+**The same tokens.** Without the flag: the 2K prompt and 96 tokens (`run_serve.py`, `--threads 8 --tail-skip 0
+--expert-swaps 0 --vram-reserve-mib 1024`), the old engine (kv-q8 7ca2409d built here the same day, `build-conv-old`)
+and the new one in turns, twice each: md5 120ea304dedaf33dba0f78348d1fd253 all four times, and v0.5.0's local engine
+(`build-s15`, the daily install's) the same. Step 15's c2c344... was another day: the pack's expert profile, which the
+daily server writes back, chose other experts for the cache (541 in VRAM here).
+
+After a restart (`test_scripts/conv_disk.py check`, the cache fixed: the daily flags and `--tail-skip 0
+--expert-swaps 0 --vram-reserve-mib 1024`). With the daily flags a prompt read fresh lends the whole expert cache to
+`--elastic-prefill` (541 -> 0 experts, 542 back after the read), so its answer runs on another cache than that of an
+engine that read nothing, and the 2K prompt again after a restart wrote other tokens from the 45th. So the check
+runs without the three options that lend the cache (`--elastic-prefill`, `--stage-next`, `--lend-staging`):
+
+| Prompt | The prompt again, a fresh engine with the disk | The next turn after a restart |
+| --- | --- | --- |
+| 1,976 tokens, 96 written | taken up at 1,975 (1 token read): the same 96 tokens as the prompt read whole | 1,500 tokens more: the same 96 tokens as two turns in one engine (two runs, the same between them) |
+| 37,433 tokens, 96 written | taken up at 37,432: the same 96 tokens | 3,000 tokens more: the same 96 tokens |
+
+With the daily flags the next turn's two references (two turns in one engine) differed from each other from the 67th
+token, and the run after a restart wrote the tokens of one of them to the end.
+
+**Measured.** `test_scripts/conv_disk.py restart`: a conversation of 40,000 or 70,000 tokens (the 37K prompt, then
+tool answers of source files, as `turn_read.py` makes them) read fresh, 16 tokens written; the engine ended as the
+Gateway ends it (`taskkill /F /T`), once its writes were done (the disk's "wrote" line); a new engine started; the next
+turn sent: the prompt before and a tool answer of 3,000 tokens, without the 16 tokens (the server's next prompt leaves
+an answer's thinking out, as in `turn_read.py`). The daily flags of 2026-10-26 (`--max-context 147456 --kv-q8
+--prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts --elastic-prefill 1024 --lend-staging
+--stage-next --suffix-drafts 256 --cpu-multi --conversation-cache-mib 12288 --conversation-cache-slots 8
+--prompt-cache-message 2048`), a fresh copy of the expert profile for the first engine (the second reads what the first
+left); the folder on the laptop's SSD (C:). Old = v0.5.0's source built here (`build-conv-old`), new = this branch with
+`--conversation-disk`; old, new, old, new; then one run of each with the next turn sent to the first engine (no
+restart). The RTX 3060 Laptop 6 GB, nothing else on the card, 2026-10-26.
+
+| | Old | New, `--conversation-disk` | No restart (old; new) |
+| --- | ---: | ---: | ---: |
+| 40K: the next turn's first token after the GEN line | 39.98, 40.00 s | **5.52, 5.52 s** | 5.17; 5.21 s |
+| taken up at; tokens read | 0; 43,000 | 39,999; 3,001 | 39,999; 3,001 |
+| of the new engine's prompt time: the disk read (519 MiB) | | 0.17 s | |
+| 70K: the next turn's first token | 83.01, 83.11 s | **7.27, 7.18 s** | 6.50; 6.49 s |
+| taken up at; tokens read | 0; 73,000 | 69,999; 3,001 | 70,000; 3,000 |
+| of the new engine's prompt time: the disk read (862 MiB) | | 0.58 s | |
+| The engine's start, to READY | 3.1, 3.1 s (40K); 3.2, 3.2 s (70K) | 3.2, 3.2 s; 3.3, 3.3 s | |
+| The first read (fresh), 40K; 70K | 36.5, 36.6 s; 78.3, 78.6 s | 36.6, 36.6 s; 78.4, 78.4 s | |
+
+After a restart the turn costs what it costs without one, and the disk's read: 0.3 s more at 40K, 0.7 s at 70K. The
+start is 0.1 s longer: the folder's files and the key, of which 0.14 s, most of it the executable's hash (66 MB from
+the file cache).
+
+What the writing costs, on the same runs:
+
+| | 40K | 70K |
+| --- | ---: | ---: |
+| The engine's thread after the first answer: rows copied to RAM (`hold()`), then `commit()` | 456.5 MiB in 81, 84 ms; 0.3 ms | 798.9 MiB in 163, 182 ms; 0.3 ms |
+| On disk, the conversation | 833 MiB in 8 files | 1,175 MiB in 8 files |
+| Written in the background after that answer | 834 MiB in 0.87, 0.75 s | 1,176 MiB in 1.22, 1.34 s |
+| After the next turn (3,000 tokens) | 160 MiB in 0.20 s (34 MiB of rows, the rest two new checkpoints, two old ones deleted) | 160 MiB in 0.20 s |
+| The engine's private bytes after the first answer, old -> new | 7,191 -> 7,643 MiB | 7,200 -> 7,999 MiB |
+
+The RAM is the rows of the conversation in the engine, held as if it were parked: they count in
+`--conversation-cache-mib`, which parking would fill with them anyway. A state is 62.9 MiB with Qwen3.6, so a turn
+writes its new rows (11.7 KiB a token) and one state for each checkpoint it took: 100 to 300 MiB a turn of an agent
+session.
+
+An engine ended at once after its DONE line, while 833 MiB were on their way (`--early`): the next one found no
+conversation (its file was not written yet), deleted the five blobs written so far, and read the 43,000 tokens from
+their start (39.99 s). Nothing else went wrong.
+
+**What the writing costs an agent's answers** (`test_scripts/agent_bench.py run`, 35 answers in one engine, the
+daily flags of step 16 with `--lend-staging --stage-next --suffix-drafts 256 --cpu-multi --prompt-cache-message 2048`;
+new with `--conversation-disk` on a fresh folder; old, new, old, new, old, new, 2026-10-27). The first run, an old
+one, came after the PC had been off, with the model's file not yet in the OS cache (prompts 101.8 s, answers 75.6
+tok/s), and is left out:
+
+| | Old | New, `--conversation-disk` |
+| --- | --- | --- |
+| The 35 answers, tok/s (every token over all the decode time) | 89.7, 93.3 | 89.4, 96.0, 87.4 |
+| ms a window | 43.1, 40.7 | 37.5, 42.2, 36.5 |
+| The prompts | 82.3, 82.7 s | 84.2, 80.9, 79.6 s |
+| The engine's thread after an answer (`hold()` and `commit()`) | | 24 ms at most |
+| Written in the background | | 6,829 MiB in 158 files (195 MiB an answer), 12.3 to 13.3 s of the thread's time; 60 files deleted |
+| On disk at the end | | 8 conversations, 3,059 MiB |
+| Waited for at QUIT | | 0.4 s |
+
+The answers are written as fast and the prompts read as fast as without it, within the spread of the runs (the
+tokens written move from run to run with `--tail-skip 6`, as before).
+
+**Through the server** (`test_scripts/conv_disk.py server`): `serve/server.py` with a copy of the daily config, this
+build, the daily flags and the disk, port 18098; a chat of four source files (36,717 tokens) and 16 tokens written in
+33.1 s; the server's process tree ended with `taskkill /F /T` 5 s later, as the Gateway ends it (the engine gone 2.7 s
+after); the server started again (3.5 s to its `/health`), and the chat's next turn (the answer and a new question,
+36,753 tokens) answered in 1.64 s, the server's usage saying 36,710 of them cached: the engine read 482 MiB of the
+conversation from the disk in 182 ms and the 43 tokens after it.
+
+- **`--conversation-disk` makes an engine restart cost a long conversation what a turn costs without one, and the
+  disk's read**: the next turn's first token after 5.5 s where 40.0 at 40K, 7.2 s where 83.0 at 70K. The tokens
+  after a restart are the tokens without one, where the cache's experts are the same.
+- It writes 0.8 to 1.2 GB of a 40K to 70K conversation in the background after its first answer, then 100 to 300 MiB
+  a turn; the conversation in the engine counts in `--conversation-cache-mib` as soon as it has answered.
+- Setup writes it from v0.6.0 (`poly_speedups()`): on NVIDIA, with the conversation cache on, where the data folder's
+  disk has 20 GB free, `--conversation-disk <the data folder>\conversations --conversation-disk-mib 4096`. A
+  conversation takes 11.4 MiB a 1,000 tokens and up to six checkpoints of 63 MiB, about 2.0 GiB at the whole 144K
+  context, so 4 GiB hold that and another long one. It is not in the daily install.
+  Not tested: a PC restart (the files are written the same way; a file torn by a power cut fails its checksum and is
+  dropped), a hard disk, other cards, Linux (the lock and the rename have their own code there), Ornith 1.5, AMD
+  (host code), several conversations after a restart beyond the fake engine's test, the Gateway itself in front of
+  the server.
+
 ## Where it stands
 
-| | Before (16 threads, 2026-10-18) | Now (step 8) |
+| | Before (16 threads, 2026-10-18) | Now (v0.5.0, step 16, unless marked) |
 | --- | --- | --- |
-| Writing after 1,976 tokens | 46.7 to 61.4 tok/s | 71.3 to 73.3 tok/s |
-| Writing after 37,433 tokens | 41.7, 42.6 tok/s | 62.1, 64.9 tok/s |
-| Writing after 139k tokens | 23 tok/s at 150k (2026-10-17) | 49.4 tok/s |
-| Writing after 100k tokens (the sessions' runs) | 34.4 tok/s | 63.9 tok/s |
-| The agent benchmark, all 35 answers | | 85.9 -> 87.2, 90.6 tok/s (step 7) |
+| Writing after 1,976 tokens | 46.7 to 61.4 tok/s | 67.4, 71.0 tok/s |
+| Writing after 37,433 tokens | 41.7, 42.6 tok/s | 62.2, 63.0 tok/s |
+| Writing after 139k tokens | 23 tok/s at 150k (2026-10-17) | 55.5 tok/s (one run) |
+| Writing after 100k tokens (the sessions' runs) | 34.4 tok/s | 63.9 tok/s (step 8) |
+| The agent benchmark, all 35 answers | | 85.9 -> 87.2, 90.6 tok/s (step 7, its own count); 81.9, 84.3 (step 16: every token over all the decode time) |
 | The same task again in a new conversation | | 90.1 -> 97.9, 106.7 tok/s (step 7) |
 | Reading 1,976 tokens | 5.4 s | 3.6 s |
-| Reading 37,433 tokens | 47 s (793 tok/s) | 36 s (1,040 tok/s) |
-| Reading 139k tokens | about 270 s at 150k (2026-10-17) | 245.7 s |
+| Reading 37,433 tokens | 47 s (793 tok/s) | 33.5 s (1,117 tok/s) |
+| Reading 139k tokens | about 270 s at 150k (2026-10-17) | 237.4 s |
 | A prompt a turn of an OpenCode session of 46K to 71K, the Gateway's LODESTAR on | | 19.2 -> 7.7 s with `--prompt-cache-message 2048` (step 11, opt-in) |
 | A turn of 1,501 tokens after 38K, taken up at a checkpoint | | 6.4 s (v0.4.0) -> 5.0 s, 3.9 with `--stage-next` (step 15, opt-in) |
-| The agent benchmark's prompts | | 108 s (v0.4.0) -> 90 s, 79.6 with `--stage-next` (step 15) |
+| The agent benchmark's prompts | | 108 s (v0.4.0) -> 90 s, 79.6 with `--stage-next` (step 15); 84.4, 85.4 s with `--prompt-cache-message` as well (step 16) |
+| The next turn (3,000 tokens) of a 40K / 70K conversation after an engine restart | | 40.0 / 83.0 s -> 5.5 / 7.2 s with `--conversation-disk` (step 17; setup writes it from v0.6.0) |
 
 Where the time goes now after a long prompt (2026-10-19, after step 7): Nsight Systems, 5 s of writing after the
 139,056-token prompt (`test_scripts/make_prompt.py 139000`), the daily flags. 10.9% of the experts came from VRAM.
@@ -1819,7 +2020,7 @@ Step 8 measured the CPU's experts at 75 to 84% of what the RAM gives while an an
 to 83 to 98% (`--cpu-multi`, the same bits): the session measured 5% faster answers after 2k, the check here 1 to 2%;
 after 139k not measurably faster. It is switched on.
 
-Next: whether other programs' memory use pushes the experts out of RAM and slows writing, and if so a way to keep
+Next, as written after step 10: whether other programs' memory use pushes the experts out of RAM and slows writing, and if so a way to keep
 them resident (a proposed task); the CPU's experts' fixed costs a call, or the next layer's experts guessed from its
 router (step 8); a task benchmark on this engine to tell the lossy settings' costs apart where the KL cannot
 (HumanEval, tool-call success; until then no lossy knob beyond today's tail skip). The 4-bit attention cache is
@@ -1827,3 +2028,9 @@ built and measured (step 9): opt-in, for a context the card cannot hold otherwis
 the four FastStrata presets against the engine of 2026-10-17 (x1.03 to x1.27 after short prompts, x1.71 to x1.98 after
 139k, x1.19 to x1.33 in the agent benchmark), what UD-Q3_K_M and APEX-I-COMPACT cost in answers, and a simulated 4 GB
 card, where `--kv-q8` fits 48K with UD-Q3_K_M.
+
+Next, as of v0.5.0 (step 16), on the main path first: parked conversations kept through an engine restart (step 14:
+restarts were 60% of the time spent reading prompts from their start; built and measured in step 17, in setup from
+v0.6.0); a task benchmark, to tell what the options that change the answers cost where the KL cannot; then the
+smaller candidates of step 14. UD-Q3_K_M's experts on a fast CPU
+path and the 4 GB card come after the main path.

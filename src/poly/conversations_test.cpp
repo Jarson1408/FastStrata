@@ -1,15 +1,22 @@
 // src/poly/conversations_test.cpp - Conversations against an engine whose state can be checked: after every
-// request the engine must hold exactly what reading the prompt from its first token gives.
+// request the engine must hold exactly what reading the prompt from its first token gives.  With a disk, also
+// across a restart: a new engine and cache that take up what the last one left on disk.
 //
-//   g++ -std=c++20 src/poly/conversations_test.cpp -o conversations_test && ./conversations_test
+//   g++ -std=c++20 -Iinclude src/poly/conversations_test.cpp src/poly/conversation_disk.cpp \
+//       src/core/conversation_file.cpp -o conversations_test && ./conversations_test
 #include "conversations.hpp"
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <random>
 
 using strata::poly::CacheOptions;
+using strata::poly::ConversationDisk;
 using strata::poly::Conversations;
+using strata::poly::StoredConversation;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -119,6 +126,8 @@ struct Chat {
             ids.push_back(t);
         }
         check(e.holds(ids) && kept.seq() == ids, "the engine holds the prompt and the reply");
+        kept.hold();   // what the server does after an answer; nothing without a disk
+        kept.store();
         return from;
     }
 };
@@ -341,6 +350,207 @@ void any_order() {
     }
 }
 
+// ---- the disk
+
+fs::path scratch() {
+    static const fs::path root = fs::temp_directory_path() / ("poly-conversations-test-" + std::to_string(std::random_device{}()));
+    return root;
+}
+
+// An engine's start: the disk's folder taken, and a cache that takes up what is there.
+struct Run {
+    ConversationDisk disk;
+    std::unique_ptr<Chat> chat;
+    size_t found = 0, taken = 0;
+    Run(const fs::path& dir, CacheOptions o, const std::string& key = "key 1\n", uint64_t limit_mib = 1 << 20,
+        size_t state = 8) {
+        std::vector<StoredConversation> stored;
+        ConversationDisk::Settings d;
+        d.dir = dir;
+        d.key = key;
+        d.limit = limit_mib << 20;
+        check(disk.open(d, stored), "the disk's folder can be taken");
+        found = stored.size();
+        o.disk = &disk;
+        chat = std::make_unique<Chat>(o);
+        chat->e.state = state;
+        taken = chat->kept.adopt(std::move(stored));
+    }
+    Chat& c() { return *chat; }
+};
+
+size_t files(const fs::path& dir, const char* ext) {
+    size_t n = 0;
+    for (const fs::directory_entry& e : fs::directory_iterator(dir))
+        n += e.path().extension() == ext;
+    return n;
+}
+
+void disk_restart() {
+    const fs::path dir = scratch() / "restart";
+    std::vector<int32_t> a = text(1, 9000), b = text(2, 3000);
+    int64_t without[2], with[2], read_without[2], read_with[2];
+    for (const bool restart : {false, true}) {
+        fs::remove_all(dir);
+        auto first = std::make_unique<Run>(dir, options(64));
+        check(first->found == 0, "an empty folder has nothing");
+        std::vector<int32_t> x = a, y = b;
+        first->c().ask(x);
+        first->c().ask(y);   // x is parked, y is in the engine
+        std::unique_ptr<Run> next;
+        Chat* c = &first->c();
+        if (restart) {
+            first->disk.flush();
+            check(files(dir, ".conv") == 2, "both conversations are on disk, the one in the engine too");
+            first.reset();
+            next = std::make_unique<Run>(dir, options(64));
+            check(next->found == 2 && next->taken == 2, "and the next engine takes both up");
+            c = &next->c();
+        }
+        y = y + text(4, 100);
+        const int64_t r0 = c->e.read;
+        (restart ? with : without)[0] = c->ask(y);
+        (restart ? read_with : read_without)[0] = c->e.read - r0;
+        x = x + text(3, 200);
+        const int64_t r1 = c->e.read;
+        (restart ? with : without)[1] = c->ask(x);
+        (restart ? read_with : read_without)[1] = c->e.read - r1;
+    }
+    check(without[0] == 3003 && with[0] == 2999, "the one that was in the engine comes back at its last checkpoint");
+    check(read_with[0] == read_without[0] + 4, "and reads the tokens after it again: its prompt's last and the reply");
+    check(without[1] == 8999 && with[1] == 8999, "a parked conversation comes back at the end of its prompt");
+    check(read_with[1] == read_without[1], "and reads as much after a restart as without");
+
+    // what the engine has read after a restart goes on to the disk as before: a third start takes it up
+    fs::remove_all(dir);
+    std::vector<int32_t> z = text(5, 6000);
+    {
+        Run r(dir, options(64));
+        r.c().ask(z);
+    }
+    for (int k = 0; k < 3; ++k) {
+        Run r(dir, options(64));
+        check(r.taken == 1, "the conversation is there at every start");
+        z = z + text(10 + k, 1500);
+        const int64_t before = (int64_t) z.size() - 1500 - 3 - 1;
+        check(r.c().ask(z) == before, "and goes on from its last checkpoint every time");
+    }
+}
+
+void disk_key_and_files() {
+    const fs::path dir = scratch() / "files";
+    fs::remove_all(dir);
+    std::vector<int32_t> a = text(1, 5000), b = text(2, 4000);
+    {
+        Run r(dir, options(64));
+        r.c().ask(a);
+        r.c().ask(b);
+    }
+    {
+        Run r(dir, options(64), "key 2\n");
+        check(r.found == 0 && files(dir, ".conv") == 0 && files(dir, ".blob") == 0,
+              "files made for another key are deleted");
+        check(r.c().ask(a) == 0, "and the conversation is read again");
+        r.c().ask(b);
+    }
+    {
+        // a second engine on the same folder runs without it
+        Run r(dir, options(64), "key 2\n");
+        ConversationDisk other;
+        std::vector<StoredConversation> none;
+        ConversationDisk::Settings d;
+        d.dir = dir;
+        d.key = "key 2\n";
+        d.limit = 1 << 30;
+        check(!other.open(d, none), "a folder in use is not taken twice");
+    }
+    // a file an engine was writing when it ended, a conversation's file cut short, and a garbled blob
+    std::ofstream(dir / "b-00000000000000ff.blob.tmp") << "half";
+    std::vector<fs::path> convs, blobs;
+    for (const fs::directory_entry& e : fs::directory_iterator(dir)) {
+        if (e.path().extension() == ".conv") convs.push_back(e.path());
+        if (e.path().extension() == ".blob") blobs.push_back(e.path());
+    }
+    check(convs.size() == 2, "two conversations on disk");
+    fs::resize_file(convs[0], fs::file_size(convs[0]) - 1);
+    for (const fs::path& f : blobs) {   // a byte inside every rows blob (the large ones): its size stays
+        if (fs::file_size(f) < 4096) continue;
+        std::fstream g(f, std::ios::in | std::ios::out | std::ios::binary);
+        g.seekp(1000);
+        g.put('\x5A');
+    }
+    {
+        Run r(dir, options(64), "key 2\n");
+        check(!fs::exists(dir / "b-00000000000000ff.blob.tmp"), "a file left half written is deleted");
+        check(r.found == 1 && files(dir, ".conv") == 1, "a conversation's file cut short is deleted at the start");
+        std::vector<int32_t> again = a + text(3, 10), other = b + text(4, 10);
+        const int64_t x = r.c().ask(again), y = r.c().ask(other);
+        check(x == 0 && y == 0, "one whose blob is garbled is read again, when a prompt goes back to it");
+    }
+}
+
+void disk_limit() {
+    const fs::path dir = scratch() / "limit";
+    fs::remove_all(dir);
+    {
+        // 300 KiB checkpoints: a conversation takes about 0.96 MiB on disk (three and its rows); 1 MiB holds the
+        // latest one only
+        Run r(dir, options(64, 8), "key 1\n", 1, 300 << 10);
+        std::vector<int32_t> v[3] = {text(1, 5000), text(2, 5000), text(3, 5000)};
+        for (auto& x : v) r.c().ask(x);
+        r.disk.flush();
+        check(r.c().kept.parked() == 2 && files(dir, ".conv") == 1, "the disk holds what its limit takes, the latest first");
+        check(r.disk.held_bytes() <= (1u << 20), "and no more");
+    }
+    Run r(dir, options(64, 8), "key 1\n", 1, 300 << 10);
+    check(r.taken == 1, "the next start takes that one up");
+}
+
+// Any order of prompts as in any_order(), with the engine started again at any point: it always holds the prompt.
+void disk_any_order() {
+    std::mt19937 rng(23);
+    const int64_t every[] = {0, 64, 256, 1000}, budget[] = {1, 64};
+    for (int round = 0; round < 12; ++round) {
+        const fs::path dir = scratch() / ("any-" + std::to_string(round));
+        fs::remove_all(dir);
+        CacheOptions o;
+        o.checkpoints = 1 + (int) (rng() % 5);
+        o.every = every[rng() % 4];
+        o.park_mib = budget[rng() % 2];
+        o.park_slots = 1 + (int) (rng() % 4);
+        o.park_min = rng() % 2 ? 200 : 0;
+        const size_t state = rng() % 2 ? 100 << 10 : 8;
+        const uint64_t limit = rng() % 3 ? 1 << 20 : 1;
+        auto run = std::make_unique<Run>(dir, o, "key 1\n", limit, state);
+        run->c().rng.seed((unsigned) round);
+        std::vector<std::vector<int32_t>> chats;
+        for (int step = 0; step < 40; ++step) {
+            if (rng() % 6 == 0) {
+                run.reset();
+                run = std::make_unique<Run>(dir, o, "key 1\n", limit, state);
+                run->c().rng.seed((unsigned) (round * 100 + step));
+                check(run->taken <= (size_t) o.park_slots, "no more taken up than slots");
+            }
+            std::vector<int32_t> ids;
+            const unsigned what = rng() % 10;
+            if (chats.empty() || what == 0) {
+                ids = text((int) rng(), 1 + (int) (rng() % 1500));
+            } else {
+                ids = chats[rng() % chats.size()];
+                if (what < 4) ids.resize(1 + rng() % ids.size());
+                ids = ids + text((int) rng(), (int) (rng() % 400));
+            }
+            const int64_t turn = rng() % 2 ? (int64_t) (rng() % ids.size()) : -1;
+            const int64_t message = turn > 0 && rng() % 2 ? (int64_t) (rng() % turn) : -1;
+            run->c().ask(ids, (int) (rng() % 5), turn, message);
+            chats.push_back(ids);
+            check(run->c().kept.parked() <= (size_t) o.park_slots, "no more parked than slots");
+            check(run->c().kept.parked_bytes() <= ((size_t) o.park_mib << 20), "no more parked than the budget");
+            check(run->disk.held_bytes() <= (limit << 20), "no more on disk than its limit");
+        }
+    }
+}
+
 }  // namespace
 
 // A long prompt read in one go has more checkpoints due than a conversation keeps.  Only the ones it keeps get a
@@ -386,6 +596,20 @@ int main() {
     }
     quits = 0;
     long_read();
+    for (const int64_t f : {0, 6000}) {
+        far = f;
+        disk_restart();
+        disk_key_and_files();
+        disk_limit();
+        disk_any_order();
+    }
+    quits = 3;
+    far = 700;
+    disk_any_order();
+    quits = 0;
+    far = 0;
+    std::error_code ec;
+    fs::remove_all(scratch(), ec);
     std::printf("conversations_test: %d checks passed\n", checks);
     return 0;
 }

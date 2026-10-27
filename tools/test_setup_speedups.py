@@ -35,7 +35,9 @@ FORK_USAGE = (b"usage: strata-poly --model FILE.gguf\n  --threads N   CPU thread
               b"  --attn-split  ...\n  --graph-experts  ...\n  --prompt-batch N\n  --elastic-prefill N\n"
               b"  --elastic-batch N\n  --conversation-cache-mib N\n  --conversation-cache-slots N\n  --tail-skip N\n"
               b"  --prompt-cache-message N\n  --lend-staging  Qwen3.5 / 3.6 on one card\n"
-              b"  --stage-next  Qwen3.5 / 3.6 on one card\n\0"
+              b"  --stage-next  Qwen3.5 / 3.6 on one card\n"
+              b"  --conversation-disk DIR   keep what the conversation cache holds in DIR too\n"
+              b"  --conversation-disk-mib N   what its files may take\n\0"
               b"--attn-split\0--kv-q8\0")
 UPSTREAM_USAGE = (b"usage: strata-poly --model FILE.gguf\n  --threads N\n  --kv-whole\n  --kv-q8x\n  --kv-q4-old\n"
                   b"  --attn-split-old\n"
@@ -46,10 +48,13 @@ UPSTREAM_USAGE = (b"usage: strata-poly --model FILE.gguf\n  --threads N\n  --kv-
 LAPTOP = {"cards": [("NVIDIA GeForce RTX 3060 Laptop GPU", 6144, "86")], "ram": 59.86, "avx2": True,
           "threads": (8, 16), "hybrid": None, "win": True}
 # its daily config, strata-qwen36-ud-q4_k_m.json, 2026-10-19 (step 8): the options setup chooses, without the paths
+# (--conversation-disk's folder among them: the data folder's "conversations")
 DAILY = ["--max-context", "147456", "--conversation-cache-mib", "12288", "--tail-skip", "6", "--kv-q8",
          "--prompt-batch", "512", "--attn-split", "--threads", "8", "--conversation-cache-slots", "8", "--graph-experts",
          "--elastic-prefill", "1024", "--suffix-drafts", "256", "--cpu-multi", "--prompt-cache-message", "2048",
-         "--lend-staging", "--stage-next"]
+         "--lend-staging", "--stage-next", "--conversation-disk-mib", "4096"]
+# a disk with room for --conversation-disk: its folder and the GB free there
+ROOMY = (Path("D:/PolyStrata-data/conversations"), 500.0)
 # a 32 GB laptop with an 8 GB card and an Intel CPU of 6 performance cores (two threads each) and 8 efficiency cores
 HYBRID = {"cards": [("NVIDIA GeForce RTX 4060 Laptop GPU", 8188, "89")], "ram": 31.7, "avx2": True,
           "threads": (14, 20), "hybrid": (6, 8), "win": True}
@@ -74,10 +79,11 @@ PASCAL = {"cards": [("NVIDIA GeForce GTX 1080 Ti", 11264, "61")], "ram": 31.9, "
 NO_AVX2 = {"cards": [("NVIDIA GeForce RTX 3060", 12288, "86")], "ram": 47.9, "avx2": False, "threads": (6, 12),
            "hybrid": None, "win": False}
 
-PATHS = ("--model", "--expert-profile", "--draft-model")
+PATHS = ("--model", "--expert-profile", "--draft-model", "--conversation-disk")
 CUDA_ONLY = ("--attn-split", "--graph-experts", "--elastic-prefill", "--kv-q8", "--kv-q4")
 NEW = CUDA_ONLY + ("--threads", "--suffix-drafts", "--cpu-multi", "--prompt-batch", "--conversation-cache-slots",
-                   "--prompt-cache-message", "--lend-staging", "--stage-next")
+                   "--prompt-cache-message", "--lend-staging", "--stage-next", "--conversation-disk",
+                   "--conversation-disk-mib")
 UNSUPPORTED = ("tiel", "gemma4", "glm", "deepseek")             # strata-poly's; the Strata engine's: test_setup_menu
 
 
@@ -110,8 +116,9 @@ def quiet(fn, *args):
     return code, out.getvalue()
 
 
-def rule(machine, model=None, mode="on", ctx=32768, family="qwen36"):
-    """poly_speedups() for a fake machine, as poly_setup() calls it: -> ({option: value}, notes, kv plan, size)."""
+def rule(machine, model=None, mode="on", ctx=32768, family="qwen36", disk=ROOMY):
+    """poly_speedups() for a fake machine, as poly_setup() calls it: -> ({option: value}, notes, kv plan, size).
+    `disk`: the --conversation-disk folder and the GB free on its disk (default: one with room)."""
     fam = setup.FAMILIES[family]
     hip = "amd" in machine
     cards = machine.get("amd") or machine["cards"]
@@ -126,7 +133,7 @@ def rule(machine, model=None, mode="on", ctx=32768, family="qwen36"):
     conv = setup.poly_conv_mib(family, mode, machine["ram"], need)
     items, notes = setup.poly_speedups(family, mode, d, gpu, hip, list(range(len(cards))) if len(cards) > 1 else [],
                                        machine["ram"], need, machine["avx2"], machine["threads"], machine["hybrid"],
-                                       ("f16", 1024) if hip else plan[:2], conv)
+                                       ("f16", 1024) if hip else plan[:2], conv, disk)
     return options([x for a, _why in items for x in a]), notes, plan, model
 
 
@@ -224,7 +231,7 @@ class Rule(unittest.TestCase):
         self.assertEqual(setup.hybrid_pool_workers(HYBRID["hybrid"]), 9)
         self.assertEqual(got, {"--attn-split": None, "--graph-experts": None, "--elastic-prefill": "1024",
                                "--suffix-drafts": "256", "--cpu-multi": None, "--prompt-cache-message": "2048",
-                               "--lend-staging": None, "--stage-next": None})
+                               "--lend-staging": None, "--stage-next": None, "--conversation-disk-mib": "4096"})
         self.assertEqual(notes, [])
 
     def test_16_gb(self):
@@ -384,6 +391,32 @@ class Rule(unittest.TestCase):
         want = {k: v for k, v in options(DAILY).items() if k not in ("--max-context", "--conversation-cache-mib",
                                                                      "--tail-skip")}
         self.assertEqual((got, notes), (want, []))
+
+    def test_conversation_disk(self):
+        items, notes = setup.poly_speedups("qwen36", "on", setup.FAMILIES["qwen36"]["models"]["UD-Q4_K_M"],
+                                           {"arch": "86", "vram_gb": 6.0}, False, [], 59.86, 28.7, True, (8, 16), None,
+                                           ("q8", 512), 12288, ROOMY)
+        args = [x for a, _why in items for x in a]
+        self.assertEqual(args[args.index("--conversation-disk"):][:4],
+                         ["--conversation-disk", str(ROOMY[0]), "--conversation-disk-mib", "4096"])
+        self.assertNotIn("--conversation-disk", " ".join(notes))
+        # the data folder's disk without room for its files and the engine's 10 GiB: none, and setup says why
+        got, notes, _plan, _m = rule(LAPTOP, model="UD-Q4_K_M", ctx=147456, disk=(ROOMY[0], 19.0))
+        self.assertNotIn("--conversation-disk-mib", got)
+        self.assertIn("--conversation-disk left out: the data folder's disk has 19 GB free, and it wants 20", notes[0])
+        got, notes, _plan, _m = rule(LAPTOP, model="UD-Q4_K_M", ctx=147456, disk=(ROOMY[0], None))
+        self.assertNotIn("--conversation-disk-mib", got)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("--conversation-disk-mib", rule(LAPTOP, model="UD-Q4_K_M", ctx=147456, disk=(ROOMY[0], 20.0))[0])
+        # it keeps the conversation cache: none without it, and none on an AMD card (measured on NVIDIA only)
+        items, _notes = setup.poly_speedups("qwen36", "on", setup.FAMILIES["qwen36"]["models"]["UD-Q4_K_M"],
+                                            {"arch": "86", "vram_gb": 6.0}, False, [], 59.86, 28.7, True, (8, 16),
+                                            None, ("q8", 512), 0, ROOMY)
+        self.assertNotIn("--conversation-disk", [x for a, _why in items for x in a])
+        got, notes, _plan, _m = rule(AMD)
+        self.assertNotIn("--conversation-disk-mib", got)
+        self.assertIn("--conversation-disk left out: measured on NVIDIA cards only", notes)
+        self.assertEqual(rule(LAPTOP, model="UD-Q4_K_M", mode="off", ctx=147456)[:2], ({}, []))
 
     def test_off_and_the_families_faststrata_does_not_support(self):
         self.assertEqual(rule(LAPTOP, model="UD-Q4_K_M", mode="off", ctx=147456)[:2], ({}, []))
@@ -577,6 +610,7 @@ class Install(unittest.TestCase):
         code, out, cfg = self.laptop()
         self.assertEqual(code, 0, out)
         self.assertEqual(options(cfg["args"]), options(DAILY))
+        self.assertEqual(cfg["args"][cfg["args"].index("--conversation-disk") + 1], str(self.t / "data" / "conversations"))
         self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_POLY_DIR / setup.POLY_EXE)
         self.assertEqual(self.built, [("cuda", ["86"])])            # compiled from this source
         self.assertEqual(cfg["speedups"], "on")
@@ -589,8 +623,8 @@ class Install(unittest.TestCase):
         if mine is not None:                                        # the laptop's own file, read only
             daily = options(json.loads(mine.read_text(encoding="utf-8-sig"))["args"])
             later = {k: v for k, v in (("--prompt-cache-message", "2048"), ("--lend-staging", None),   # steps 11,
-                                       ("--stage-next", None))                                  # 13 and 15 came
-                     if k not in daily}                                                             # after it
+                                       ("--stage-next", None), ("--conversation-disk-mib", "4096"))  # 13, 15 and
+                     if k not in daily}                                                     # 17 came after it
             self.assertEqual(options(cfg["args"]), {**daily, **later})
 
     def test_the_q3_preset_gets_neither_cpu_multi_nor_graph_experts(self):

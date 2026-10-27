@@ -218,7 +218,9 @@ memory (off at the start, with a switch). After the model, setup offers it; say 
   `.bak` of the file and leaving the rest of it as it was; the folder is made where there is none;
 - makes a desktop shortcut **FastStrata**, which opens the gateway's app; the app starts the model when OpenCode asks,
   and closing it frees the card and the RAM. The model's start takes about a minute on the 6 GB test laptop: the
-  first answer after the app opens, or after a swap to another model, waits for it, and OpenCode waits too.
+  first answer after the app opens, or after a swap to another model, waits for it, and OpenCode waits too. From
+  v0.6.0 the conversations the model had read come back from disk after that (`--conversation-disk`): on the test
+  laptop the next turn of a 70K conversation after a restart started after 7.2 s where 83.0.
 
 In OpenCode, pick a model of the provider FastStrata. Later, or on an install made without it:
 `START-HERE.bat --gateway on` (`./setup.sh --gateway on`). With `--yes` setup leaves it out unless `--gateway on` is
@@ -274,6 +276,7 @@ the test laptop, for UD-Q4_K_M at 144K:
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
 --elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
 --conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048
+--conversation-disk <the data folder>\conversations --conversation-disk-mib 4096
 ```
 
 Each where the PC and the preset take it ([which PC gets which](docs/RESULTS.md#configuration)), and setup prints each
@@ -286,7 +289,7 @@ FastStrata is the third project in a line. [Strata](https://github.com/Niko1221/
 runs Qwen3.8-Flash-Next with its experts split between the card and the CPU, and brought the installer, the server and
 the web app. [PolyStrata](https://github.com/VecSzn/PolyStrata) (VecSzn) added `strata-poly`, an engine that reads a
 model's GGUF file in place, for Qwen3.6-35B-A3B, Ornith 1.5 and others. FastStrata narrows it to the two models that
-fit a gaming PC, four presets in all, and makes `strata-poly` fast on a small card: thirteen measured steps, eleven changes
+fit a gaming PC, four presets in all, and makes `strata-poly` fast on a small card: fourteen measured steps, twelve changes
 to the engine and its settings ([each one](docs/RESULTS.md#what-faststrata-changed)).
 
 For Qwen3.8-Flash-Next use [Strata](https://github.com/Niko1221/Strata). Plans: expert profiles shipped with each

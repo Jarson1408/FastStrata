@@ -38,7 +38,10 @@ answer is written ([below](#--lend-staging-the-staging-buffers-vram-to-the-exper
 setup writes it on one NVIDIA card from v0.4.0. A twelfth, `--stage-next`, copies the next layer's experts while a
 layer of a prompt runs, into a second staging buffer the expert cache lends for the read
 ([below](#--stage-next-the-next-layers-experts-copied-while-a-layer-runs)); setup writes it on one NVIDIA card of
-5 GB or more from v0.5.0.
+5 GB or more from v0.5.0. A thirteenth, `--conversation-disk`, keeps the parked conversations on disk, so that an
+engine restart does not read them again
+([below](#--conversation-disk-parked-conversations-kept-through-an-engine-restart)); setup writes it on NVIDIA from
+v0.6.0, where the data folder's disk has room.
 
 ## What setup turns on, and when
 
@@ -78,6 +81,7 @@ card, CPU and RAM take them, and prints each one with what it gave:
 | `--prompt-batch 512` | prompt batches of 512 tokens where the engine takes 1,024: 0.7 GB more VRAM for the context | the 144K context (with `--kv-q8`) | as `--kv-q8`, where 8 bits alone do not make the context fit |
 | `--kv-q4`, then `--kv-q4-keys q4` | the attention cache's values in 4 bits and its keys in 8 (8.9 KB a token), then the keys in 4 bits too (6.2 KB); lossy, more than `--kv-q8` ([below](#--kv-q4-the-context-cache-in-4-bits-for-a-card-too-small-for-the-context)) | 184K and 256K on the 6 GB card, where `--kv-q8` holds 144K | NVIDIA, only where even `--kv-q8` with batches of 512 does not fit the context asked for, by setup's estimate. Setup says what it costs and asks (`--yes` takes it) |
 | `--conversation-cache-mib 12288`, `--conversation-cache-slots 8` | 12 GiB for 8 parked conversations where 8 GiB for 4 | not measured for speed (step 2) | a PC with 24 GB of RAM more than setup estimates the preset wants (the laptop: 60 against 29) |
+| `--conversation-disk <the data folder>\conversations`, `--conversation-disk-mib 4096` | the parked conversations on disk too, up to 4 GiB, so that an engine restart does not read them again ([below](#--conversation-disk-parked-conversations-kept-through-an-engine-restart)) | the next turn of a 40K / 70K conversation after a restart 5.5 / 7.2 s where 40.0 / 83.0 (step 17) | NVIDIA, with the conversation cache on, where the data folder's disk has 20 GB free (4 GiB of files and the 10 GiB the engine keeps free beside them) |
 
 - **AMD cards** get `--threads`, `--suffix-drafts`, `--cpu-multi` and the conversation cache: the others are CUDA
   code that was neither built nor run for HIP.
@@ -559,3 +563,58 @@ or several cards. An install made before adds `"--stage-next"` to the `args` of 
 not add new options); an engine built before step 15 stops at the unknown option, and setup leaves the option out of a
 config for such an engine and says so. Every number: [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md),
 step 15. Not tested: other cards, a 4 GB card, AMD (HIP), Linux, Ornith 1.5.
+
+## `--conversation-disk`: parked conversations kept through an engine restart
+
+The conversation cache (`--conversation-cache-mib`) is in the engine's RAM, and an engine that ends takes it along.
+The FastStrata Gateway ends the server, engine and all, when it swaps the model, when it closes and at Stop, and a PC
+restarts now and then; the next prompt of a long conversation is then read from its first token. In the user's
+sessions of 21 to 23.10 that was 60% of the time spent reading prompts from their start: 13 to 107 s a time.
+
+With **`--conversation-disk DIR`** the engine keeps a copy of its conversation cache in `DIR`, and the next engine of
+the same model takes it up and goes on where a prompt matches, as it does from RAM. After every answer the conversation
+in the engine, up to its last checkpoint, is held in RAM as if it were parked (it counts in `--conversation-cache-mib`
+from then on), and a thread of its own writes what the cache holds while the next request is waited for: a file for
+each checkpoint's state and run of rows, which conversations that start alike share, and one for each conversation.
+Each file is written under another name and renamed when whole, with a checksum, so an engine ended at any point (the
+Gateway ends it with `taskkill /F`) leaves the last whole set; a damaged file is dropped, and its conversation read
+again. The files are only good for the same model file, the same engine executable and the options that change what
+the saved states hold (`key.txt` in the model's subfolder of `DIR`): when one of them changes, the files are deleted.
+`--conversation-disk-mib N` caps what the files take (default 4,096, or `--conversation-cache-mib` when that is less),
+and the volume keeps `--conversation-disk-min-free-mib N` free beside them (default 10,240): the latest conversations
+stay, the oldest go. A conversation takes 11.4 MiB a 1,000 tokens (its attention rows with `--kv-q8`) and up to six
+checkpoints of 63 MiB: about 0.5 GiB at 10K tokens, 0.81 at 40K, 1.15 at 70K and 2.0 at the whole 144K context;
+conversations that start alike share their files (the agent benchmark's eight took 3.0 GiB). So 4 GiB hold the
+conversation at the whole context and another long one.
+
+| On the test PC, old (v0.5.0's source) and new in turns | v0.5.0 | `--conversation-disk` | No restart |
+| --- | ---: | ---: | ---: |
+| A 40K conversation: the next turn's first token after a restart | 40.0, 40.0 s | **5.5, 5.5 s** | 5.2 s |
+| tokens read for it | 43,000 | 3,001 | 3,001 |
+| A 70K conversation: the next turn's first token after a restart | 83.0, 83.1 s | **7.3, 7.2 s** | 6.5 s |
+| tokens read for it | 73,000 | 3,001 | 3,000 |
+| The engine's start | 3.1 to 3.2 s | 3.2 to 3.3 s | |
+| On disk: the 40K conversation; the 70K one | | 833 MiB; 1,175 MiB | |
+| Written in the background after the first answer; after a turn of 3,000 tokens | | 0.8 to 1.3 s; 0.2 s (160 MiB) | |
+| The engine's RAM after the first answer, 40K; 70K | 7.0 GiB | +0.44 GiB; +0.78 GiB | |
+
+| The agent benchmark, 35 answers: tok/s; its prompts | 89.7, 93.3; 82.3, 82.7 s | 89.4, 96.0, 87.4; 84.2, 80.9, 79.6 s | |
+
+The RTX 3060 Laptop 6 GB with Qwen3.6 UD-Q4_K_M and the daily flags, the folder on the laptop's SSD,
+`test_scripts/conv_disk.py restart`: the engine ended as the Gateway ends it, started again, and the conversation's
+next turn of 3,000 tokens. A restart costs the turn the disk's read: 0.17 s for the 40K conversation's 519 MiB, 0.58 s
+for the 70K one's 862 MiB. The tokens after a restart are those without one (2K and 37K prompts and their next turns,
+with the expert cache the same in both: `test_scripts/conv_disk.py check`); without the flag the engine writes
+v0.5.0's tokens. An engine ended while it was still writing left no whole conversation, and the next one read the
+prompt from its start. It needs the conversation cache on (`--conversation-cache-mib`, slots), and RAM for the
+conversation in the engine as soon as it has answered (0.44 GiB at 40K, 0.78 GiB at 70K, within the cache's budget).
+A turn of an agent session writes 100 to 300 MiB (its new rows and a 63 MiB state for each checkpoint it took).
+Setup writes it from v0.6.0 on NVIDIA, with the conversation cache on, where the data folder's disk has 20 GB free:
+`--conversation-disk <the data folder>\conversations --conversation-disk-mib 4096` (`poly_speedups()`); not on AMD
+cards, where it was not run. An install made before adds `"--conversation-disk", "C:\\path\\to\\a\\folder"` to the
+`args` of `strata-<model>.json` (`--update` does not add new options); an engine built before it stops at the unknown
+option, and setup leaves the option out of a config for such an engine and says so. Through `serve/server.py`, its process tree ended with
+`taskkill /F /T` as the Gateway ends it, a 36.7K-token chat's next turn was answered 1.6 s after the server was up
+again, 36,710 of its tokens taken from the disk. Every number: [OPTIMIZATION_LOG.md](OPTIMIZATION_LOG.md), step 17.
+Not tested: a PC restart, a hard disk, other cards, Linux, Ornith 1.5, AMD (HIP), the Gateway itself in front of the
+server.

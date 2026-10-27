@@ -5,6 +5,27 @@ into its log; each release is tagged `v<version>`. The engine inside keeps the v
 (`CMakeLists.txt`), which is another number. Every measurement named here: [docs/RESULTS.md](docs/RESULTS.md) and
 [docs/OPTIMIZATION_LOG.md](docs/OPTIMIZATION_LOG.md).
 
+## v0.6.0 - 2026-10-27
+
+A long conversation comes back after the model was stopped. The FastStrata Gateway stops the model when its app
+closes, at Stop and when it swaps the model, and the engine kept its conversations in RAM only, so the next prompt of
+a long conversation was read from its first token. Now the engine keeps them on disk too, and its next start takes them
+up: on the 6 GB test laptop the next turn of a 70K conversation after a restart started after 7.2 s where 83.0, of a
+40K one after 5.5 s where 40.0. The ready-made engine of this release is a new file,
+`strata-poly-windows-x64-b2b4ecb4224540ea.zip` (RTX 20 to RTX 50, CUDA 13.0).
+
+- `--conversation-disk DIR` (step 17 of docs/OPTIMIZATION_LOG.md): after every answer the engine writes what its
+  conversation cache holds to DIR in the background, up to `--conversation-disk-mib` (default 4096): a conversation of
+  the whole 144K context takes about 2.0 GiB, a 40K one 0.81 GiB. A file that is not whole is dropped at the next start,
+  and the files are only taken up by the same model file, engine and options. The answers are written as fast as
+  without it, and the tokens after a restart are those without one. It costs the RAM of the conversation in the engine
+  as soon as it has answered (0.44 GiB at 40K, 0.78 GiB at 70K), inside the conversation cache's budget.
+- Setup writes `--conversation-disk <the data folder>\conversations --conversation-disk-mib 4096` on NVIDIA where the
+  conversation cache is on and the data folder's disk has 20 GB free. It needs this release's engine: with an older one
+  setup leaves the option out and says so. An install updated with UPDATE.bat keeps its config: add
+  `"--conversation-disk", "C:\\path\\to\\PolyStrata-data\\conversations"` to the `args` of `strata-<model>.json`.
+- Without `--conversation-disk` the engine writes v0.5.0's tokens.
+
 ## v0.5.0 - 2026-10-26
 
 A new engine that reads prompts faster. On the 6 GB test laptop an agent's turn of 1,501 tokens after a 38K

@@ -117,7 +117,9 @@ if(STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(conversation_memory_test src/core/conversation_memory_test.cpp src/core/conversation_memory.cpp)
   target_include_directories(conversation_memory_test PRIVATE include)
   add_test(NAME conversation_memory_test COMMAND conversation_memory_test)
-  add_executable(glm_conversations_test src/poly/conversations_test.cpp)
+  add_executable(glm_conversations_test src/poly/conversations_test.cpp src/poly/conversation_disk.cpp
+                                        src/core/conversation_file.cpp)
+  target_include_directories(glm_conversations_test PRIVATE include)
   add_test(NAME glm_conversations_test COMMAND glm_conversations_test)
   add_executable(poly_guesses_test src/poly/guesses_test.cpp src/spec/draft_policy.cpp)
   target_include_directories(poly_guesses_test PRIVATE include)
@@ -1829,7 +1831,8 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
                             src/poly/gemma4.cpp src/poly/deepseek4.cpp src/poly/cpu_experts.cpp
                             src/poly/cpu_kernels_avx2.cpp src/poly/kernels.cu
-                            src/poly/kernels_dsv4.cu src/core/conversation_memory.cpp)
+                            src/poly/kernels_dsv4.cu src/core/conversation_memory.cpp
+                            src/poly/conversation_disk.cpp src/core/conversation_file.cpp)
   target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
   # the driver's virtual memory calls: the attention caches grow with the conversation; on HIP they are HIP's
   # memory management calls, which the HIP runtime itself provides (hip_compat/cuda.h)

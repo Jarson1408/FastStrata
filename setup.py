@@ -736,7 +736,7 @@ POLY_SPEEDUPS = ("on", "off")
 FASTSTRATA_FAMILIES = ("qwen36", "ornith")
 # FastStrata's release: CHANGELOG.md has a section for it, release/make_faststrata_release.py tags the public tree
 # v<this>; on the screen and in the log, so a report says which one it is
-FASTSTRATA_VERSION = "0.5.0"
+FASTSTRATA_VERSION = "0.6.0"
 STRATA_URL = "https://github.com/Niko1221/Strata"
 POLY_SUFFIX_MIB = 256            # --suffix-drafts: an index of 4.2M tokens in 160 MiB of RAM (step 7)
 POLY_ELASTIC_FROM = 1024         # --elastic-prefill: a prompt of this many tokens or more is read wider (step 5)
@@ -751,6 +751,13 @@ POLY_GRAPH_MIN_VRAM_GB = 5
 POLY_STAGE_NEXT_MIN_VRAM_GB = 5
 POLY_CONV_CACHE_BIG_MIB = 12288  # step 2: 12 GiB and 8 slots, where the RAM beside the model's holds that twice over
 POLY_CONV_CACHE_BIG_SLOTS = 8
+# --conversation-disk (step 17): the parked conversations on disk too, in the data folder's "conversations", so that an
+# engine restart (the Gateway's Stop, its close, a model swap) does not read them again.  The files take at most
+# POLY_CONV_DISK_MIB: a conversation of the whole 144K context with --kv-q8 about 2.0 GiB, a 40K one 0.81 GiB, the agent
+# benchmark's eight 3.0 GiB.  Setup gives it where the data folder's disk has POLY_CONV_DISK_MIN_FREE_GB free: those
+# files, the 10 GiB the engine keeps free beside them (--conversation-disk-min-free-mib) and some room to spare.
+POLY_CONV_DISK_MIB = 4096
+POLY_CONV_DISK_MIN_FREE_GB = 20
 # --kv-q8: a token's attention rows in Q8_0 instead of fp16, Qwen3.6's 10 attention layers and its MTP block with 2 KV
 # heads of 256: 11,968 bytes where 22,528.  --prompt-batch: about 1.4 MiB of VRAM a token of the batch (the engine's
 # --help), 1,024 by default.  At a full context a qwen35moe size keeps POLY_EXPERT_FLOOR_GB of VRAM for experts by
@@ -777,7 +784,8 @@ POLY_EXPERT_FLOOR_GB = 0.25
 # from another source than this fork's has not all of them, and stops at an option it does not know
 POLY_SPEEDUP_FLAGS = ("--threads", "--attn-split", "--graph-experts", "--elastic-prefill", "--suffix-drafts",
                       "--cpu-multi", "--kv-q8", "--kv-q4", "--kv-q4-keys", "--prompt-batch",
-                      "--conversation-cache-slots", "--prompt-cache-message", "--lend-staging", "--stage-next")
+                      "--conversation-cache-slots", "--prompt-cache-message", "--lend-staging", "--stage-next",
+                      "--conversation-disk")
 # MODEL-UPDATE Phase 1: the K-quant prompt kernels (Unsloth's UD-Q4/Q5/Q6_K_XL experts) are a library next to the CUDA
 # engine, opened only for those models; an engine without it runs them on the FP16 prompt path
 KQ_LIB = "strata_kq.dll" if WIN else "libstrata_kq.so"
@@ -6502,11 +6510,12 @@ def poly_conv_mib(family, mode, ram, need_ram) -> int:
 
 
 def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, threads, hybrid, kv=("f16", 1024),
-                  conv=0):
+                  conv=0, disk=None):
     """FastStrata's speedups for this PC and preset of Qwen3.6 or Ornith 1.5 (`size`, its FAMILIES entry): ([(engine
     args, what it does and gave)], [what was left out and why]).  Every number is from docs/OPTIMIZATION_LOG.md (the step in brackets).
     `threads`: cpu_threads(); `hybrid`: cpu_cores(); `kv`: (cache, --prompt-batch) as poly_kv_plan() and the user's
-    answer set them; `conv`: the --conversation-cache-mib setup writes.
+    answer set them; `conv`: the --conversation-cache-mib setup writes; `disk`: (the folder for --conversation-disk,
+    the GB free on its disk), or None.
     - --threads N: poly_smt_threads().
     - --attn-split: NVIDIA cards from Turing (sm_75) on, where its kernel is compiled.
     - --graph-experts: one NVIDIA card from Volta (sm_70) on with POLY_GRAPH_MIN_VRAM_GB or more, and a preset whose
@@ -6529,6 +6538,9 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
     - --conversation-cache-slots 8 beside a 12 GiB conversation cache (poly_conv_mib()).
     - --prompt-cache-message 2048: NVIDIA, as measured; a checkpoint where the prompt's last message begins, for the
       gateway's LODESTAR frame (step 11: a turn's prompt 19.3 -> 7.7 s with LODESTAR, unchanged without it).
+    - --conversation-disk DIR --conversation-disk-mib 4096: NVIDIA, as measured, with the conversation cache on and
+      POLY_CONV_DISK_MIN_FREE_GB free on the data folder's disk (step 17: the next turn of a 40K conversation after an
+      engine restart 5.5 s where 40.0, of a 70K one 7.2 s where 83.0).
     An AMD card gets the host's ones (--threads, --suffix-drafts, --cpu-multi, the cache): the others are CUDA code that
     was neither built nor run for HIP.  Ornith 1.5 has Qwen3.6's architecture and takes the same ones (preset_note()
     and poly_add_speedups() say whether a preset's speed was measured with them).  A family without "speedups" gets
@@ -6629,6 +6641,19 @@ def poly_speedups(family, mode, size, gpu, hip, multi, ram, need_ram, avx2, thre
                       "a checkpoint where the prompt's last message begins, so the gateway's LODESTAR frame there is "
                       "not read again with the turn: a LODESTAR turn's prompt 19.3 -> 7.7 s, without LODESTAR the "
                       "same 5.0 s (step 11)"))
+    if hip:
+        notes.append("--conversation-disk left out: measured on NVIDIA cards only")
+    elif conv and disk:
+        folder, free = disk
+        if free is not None and free >= POLY_CONV_DISK_MIN_FREE_GB:
+            items.append((["--conversation-disk", str(folder), "--conversation-disk-mib", str(POLY_CONV_DISK_MIB)],
+                          f"the parked conversations kept on disk too, up to {POLY_CONV_DISK_MIB // 1024} GiB, so that an "
+                          "engine restart does not read them again: the next turn of a 40K conversation after a "
+                          "restart 5.5 s where 40.0, of a 70K one 7.2 s where 83.0 (step 17)"))
+        else:
+            notes.append(f"--conversation-disk left out: the data folder's disk has {free or 0:.0f} GB free, and it "
+                         f"wants {POLY_CONV_DISK_MIN_FREE_GB} ({POLY_CONV_DISK_MIB // 1024} GiB of files and the 10 GiB "
+                         "the engine keeps free beside them)")
     return items, notes
 
 
@@ -7415,8 +7440,9 @@ def poly_install(a, p, gpu, hip, multi, ram, data, elsewhere, port, cuda_tk, lla
         ok(f"hybrid CPU ({cores[0]} performance + {cores[1]} efficiency cores): {threads} CPU threads for the experts "
            "outside VRAM (--threads in the config)")
     # FastStrata's speedups this PC, card and preset take, where the engine built here has them
+    folder = data / "conversations"                    # --conversation-disk, where the disk has room for it
     items, notes = poly_speedups(family, mode, d, gpu, hip, multi, ram, p["need_ram"], cpu_info()[1], cpu_threads(),
-                                 cores, kv, conv)
+                                 cores, kv, conv, (folder, free_gb(data)))
     poly_add_speedups(args, items, notes, eng / POLY_EXE, which, bool(d.get("measured")))
     cfg_path = p["cfg_path"]
     cfg = {"exe": str(eng / POLY_EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),

@@ -223,7 +223,9 @@ proponuje; po odpowiedzi „tak” setup:
   kopię `.bak` i nie ruszając reszty pliku; folder tworzy, gdy go nie ma;
 - tworzy na pulpicie skrót **FastStrata**, który otwiera aplikację bramki; aplikacja uruchamia model, gdy OpenCode o
   niego prosi, a jej zamknięcie zwalnia kartę i RAM. Start modelu trwa około minuty na testowym laptopie 6 GB: pierwsza
-  odpowiedź po otwarciu aplikacji albo po przełączeniu na inny model czeka na niego, a OpenCode czeka razem z nią.
+  odpowiedź po otwarciu aplikacji albo po przełączeniu na inny model czeka na niego, a OpenCode czeka razem z nią. Od
+  v0.6.0 rozmowy, które model przeczytał, wracają potem z dysku (`--conversation-disk`): na laptopie testowym następna
+  tura rozmowy 70K po restarcie zaczęła się po 7,2 s zamiast 83,0.
 
 W OpenCode wybierz model dostawcy FastStrata. Później albo na instalacji zrobionej bez niej: `START-HERE.bat --gateway
 on` (`./setup.sh --gateway on`). Z `--yes` setup ją pomija, chyba że podasz `--gateway on`; `--opencode install|skip`
@@ -278,6 +280,7 @@ laptopie testowym, dla UD-Q4_K_M przy 144K:
 --max-context 147456 --kv-q8 --prompt-batch 512 --tail-skip 6 --threads 8 --attn-split --graph-experts
 --elastic-prefill 1024 --lend-staging --stage-next --suffix-drafts 256 --cpu-multi
 --conversation-cache-mib 12288 --conversation-cache-slots 8 --prompt-cache-message 2048
+--conversation-disk <folder danych>\conversations --conversation-disk-mib 4096
 ```
 
 Każdą tam, gdzie komputer i preset ją przyjmują ([który komputer dostaje którą](docs/RESULTS.pl.md#konfiguracja)), a
@@ -291,8 +294,8 @@ FastStrata jest trzecim projektem w linii. [Strata](https://github.com/Niko1221/
 uruchamia Qwen3.8-Flash-Next z ekspertami podzielonymi między kartę a procesor i wniosła instalator, serwer i aplikację
 webową. [PolyStrata](https://github.com/VecSzn/PolyStrata) (VecSzn) dodała `strata-poly`, silnik, który czyta plik GGUF
 modelu tam, gdzie leży, dla Qwen3.6-35B-A3B, Ornith 1.5 i innych. FastStrata zawęża go do dwóch modeli, które mieszczą
-się na komputerze do gier, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: trzynaście
-zmierzonych kroków, jedenaście zmian w silniku i jego ustawieniach ([każda z nich](docs/RESULTS.pl.md#co-zmieniła-faststrata)).
+się na komputerze do gier, razem czterech presetów, i sprawia, że `strata-poly` jest szybki na małej karcie: czternaście
+zmierzonych kroków, dwanaście zmian w silniku i jego ustawieniach ([każda z nich](docs/RESULTS.pl.md#co-zmieniła-faststrata)).
 
 Do Qwen3.8-Flash-Next użyj [Strata](https://github.com/Niko1221/Strata). Plany: profile ekspertów dołączone do każdego
 presetu; tryb dla komputerów z 16–24 GB
